@@ -254,7 +254,7 @@ func TestCleanupStaleUserAndDeviceEKs(t *testing.T) {
 	seed, err := newDeviceEphemeralSeed()
 	require.NoError(t, err)
 	s := tc.G.GetDeviceEKStorage()
-	ctimeExpired := time.Now().Add(-libkb.MaxEphemeralKeyStalenessSecs * 3)
+	ctimeExpired := time.Now().Add(-libkb.MaxEphemeralKeyStaleness * 3)
 	err = s.Put(context.Background(), 0, keybase1.DeviceEk{
 		Seed: keybase1.Bytes32(seed),
 		Metadata: keybase1.DeviceEkMetadata{
@@ -282,7 +282,7 @@ func TestCleanupStaleUserAndDeviceEKsOffline(t *testing.T) {
 	seed, err := newDeviceEphemeralSeed()
 	require.NoError(t, err)
 	s := tc.G.GetDeviceEKStorage()
-	ctimeExpired := time.Now().Add(-libkb.MaxEphemeralKeyStalenessSecs * 3)
+	ctimeExpired := time.Now().Add(-libkb.MaxEphemeralKeyStaleness * 3)
 	err = s.Put(context.Background(), 0, keybase1.DeviceEk{
 		Seed: keybase1.Bytes32(seed),
 		Metadata: keybase1.DeviceEkMetadata{
