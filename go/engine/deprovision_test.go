@@ -83,9 +83,10 @@ func assertDeprovisionWithSetup(tc libkb.TestContext, targ assertDeprovisionWith
 		tc.T.Fatal(err)
 	}
 
+	m := NewMetaContextForTest(tc)
 	if tc.G.SecretStore() != nil {
 		secretStore := libkb.NewSecretStore(tc.G, fu.NormalizedUsername())
-		_, err := secretStore.RetrieveSecret()
+		_, err := secretStore.RetrieveSecret(m)
 		if err != nil {
 			tc.T.Fatal(err)
 		}
@@ -135,12 +136,12 @@ func assertDeprovisionWithSetup(tc libkb.TestContext, targ assertDeprovisionWith
 		expectedNumKeys -= 2
 	}
 
-	e := NewDeprovisionEngine(tc.G, fu.Username, true /* doRevoke */)
+	e := NewDeprovisionEngine(tc.G, fu.Username, true /* doRevoke */, libkb.LogoutOptions{})
 	uis = libkb.UIs{
 		LogUI:    tc.G.UI.GetLogUI(),
 		SecretUI: fu.NewSecretUI(),
 	}
-	m := NewMetaContextForTest(tc).WithUIs(uis)
+	m = m.WithUIs(uis)
 	if err := RunEngine2(m, e); err != nil {
 		tc.T.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func assertDeprovisionWithSetup(tc libkb.TestContext, targ assertDeprovisionWith
 
 	if tc.G.SecretStore() != nil {
 		secretStore := libkb.NewSecretStore(tc.G, fu.NormalizedUsername())
-		secret, err := secretStore.RetrieveSecret()
+		secret, err := secretStore.RetrieveSecret(m)
 		if err == nil {
 			tc.T.Errorf("Unexpectedly got secret %v", secret)
 		}
@@ -234,9 +235,10 @@ func assertDeprovisionLoggedOut(tc libkb.TestContext) {
 		tc.T.Fatal(err)
 	}
 
+	m := NewMetaContextForTest(tc)
 	if tc.G.SecretStore() != nil {
 		secretStore := libkb.NewSecretStore(tc.G, fu.NormalizedUsername())
-		_, err := secretStore.RetrieveSecret()
+		_, err := secretStore.RetrieveSecret(m)
 		if err != nil {
 			tc.T.Fatal(err)
 		}
@@ -265,14 +267,16 @@ func assertDeprovisionLoggedOut(tc libkb.TestContext) {
 	// Unlike the first test, this time we log out before we run the
 	// deprovision. We should be able to do a deprovision with revocation
 	// disabled.
-	tc.G.Logout()
+	if err := m.LogoutKillSecrets(); err != nil {
+		tc.T.Fatal(err)
+	}
 
-	e := NewDeprovisionEngine(tc.G, fu.Username, false /* doRevoke */)
+	e := NewDeprovisionEngine(tc.G, fu.Username, false /* doRevoke */, libkb.LogoutOptions{})
 	uis = libkb.UIs{
 		LogUI:    tc.G.UI.GetLogUI(),
 		SecretUI: fu.NewSecretUI(),
 	}
-	m := NewMetaContextForTest(tc).WithUIs(uis)
+	m = m.WithUIs(uis)
 	if err := RunEngine2(m, e); err != nil {
 		tc.T.Fatal(err)
 	}
@@ -283,7 +287,7 @@ func assertDeprovisionLoggedOut(tc libkb.TestContext) {
 
 	if tc.G.SecretStore() != nil {
 		secretStore := libkb.NewSecretStore(tc.G, fu.NormalizedUsername())
-		secret, err := secretStore.RetrieveSecret()
+		secret, err := secretStore.RetrieveSecret(m)
 		if err == nil {
 			tc.T.Errorf("Unexpectedly got secret %v", secret)
 		}
@@ -336,7 +340,7 @@ func assertCurrentDeviceRevoked(tc libkb.TestContext) {
 
 	if tc.G.SecretStore() != nil {
 		secretStore := libkb.NewSecretStore(tc.G, fu.NormalizedUsername())
-		_, err := secretStore.RetrieveSecret()
+		_, err := secretStore.RetrieveSecret(NewMetaContextForTest(tc))
 		if err != nil {
 			tc.T.Fatal(err)
 		}
@@ -369,7 +373,7 @@ func assertCurrentDeviceRevoked(tc libkb.TestContext) {
 		tc.T.Fatal(err)
 	}
 
-	e := NewDeprovisionEngine(tc.G, fu.Username, true /* doRevoke */)
+	e := NewDeprovisionEngine(tc.G, fu.Username, true /* doRevoke */, libkb.LogoutOptions{})
 	uis = libkb.UIs{
 		LogUI:    tc.G.UI.GetLogUI(),
 		SecretUI: fu.NewSecretUI(),
@@ -385,7 +389,7 @@ func assertCurrentDeviceRevoked(tc libkb.TestContext) {
 
 	if tc.G.SecretStore() != nil {
 		secretStore := libkb.NewSecretStore(tc.G, fu.NormalizedUsername())
-		secret, err := secretStore.RetrieveSecret()
+		secret, err := secretStore.RetrieveSecret(NewMetaContextForTest(tc))
 		if err == nil {
 			tc.T.Errorf("Unexpectedly got secret %v", secret)
 		}

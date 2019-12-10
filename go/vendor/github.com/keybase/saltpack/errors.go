@@ -14,10 +14,6 @@ var (
 	// request with a (-1,nil) return value, and no hidden keys are found.
 	ErrNoDecryptionKey = errors.New("no decryption key found for message")
 
-	// ErrNoSenderKey indicates that on decryption/verification we couldn't find a public key
-	// for the sender.
-	ErrNoSenderKey = errors.New("no sender key found for message")
-
 	// ErrTrailingGarbage indicates that additional msgpack packets were found after the
 	// end of the encryption stream.
 	ErrTrailingGarbage = errors.New("trailing garbage found at end of message")
@@ -71,7 +67,21 @@ var (
 	// encountered that isn't both the last one and the first one
 	// (for V2 and higher), or isn't the last one (for V1).
 	ErrUnexpectedEmptyBlock = errors.New("unexpected empty block")
+
+	// ErrShortSliceOrBuffer is returned when the input slice or buffer provided
+	// is too short to determine if it is the beginning of a binary saltpack message
+	ErrShortSliceOrBuffer = errors.New("the slice or buffer is too short to tell if it is the beginning of a saltpack message")
+
+	// ErrNotASaltpackMessage is returned when the message given as input is not
+	// a valid  saltpack message
+	ErrNotASaltpackMessage = errors.New("not a saltpack message")
 )
+
+// ErrNoSenderKey indicates that on decryption/verification we couldn't find a public key
+// for the sender.
+type ErrNoSenderKey struct {
+	Sender []byte
+}
 
 // ErrBadTag is generated when a payload hash doesn't match the hash
 // authenticator. It specifies which Packet sequence number the bad packet was
@@ -112,6 +122,9 @@ func makeErrBadFrame(format string, args ...interface{}) error {
 	return ErrBadFrame{fmt.Sprintf(format, args...)}
 }
 
+func (e ErrNoSenderKey) Error() string {
+	return "no sender key found for message"
+}
 func (e ErrWrongMessageType) Error() string {
 	return fmt.Sprintf("Wrong saltpack message type: wanted %s, but got %s instead", e.wanted, e.received)
 }

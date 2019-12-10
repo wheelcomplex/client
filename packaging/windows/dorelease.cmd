@@ -3,6 +3,8 @@ if NOT DEFINED KBFSRevision set KBFSRevision=master
 if NOT DEFINED UpdaterRevision set UpdaterRevision=master
 if NOT DEFINED ReleaseRevision set ReleaseRevision=master
 
+set GOARCH=amd64
+
 set OUTPUT=echo
 if DEFINED SlackBot set OUTPUT=go run %GOPATH%/src/github.com/keybase/slackbot/send/main.go -i=1
 
@@ -19,8 +21,6 @@ if NOT DEFINED DevEnvDir call "%ProgramFiles(x86)%\\Microsoft Visual Studio 14.0
 IF [%UpdateChannel%] == [Smoke2] goto:done_ci
 
 :: NOTE: We depend on the bot or caller to checkout client first
-:: call:checkout_keybase client, %ClientRevision% || goto:build_error || EXIT /B 1
-call:checkout_keybase kbfs, %KBFSRevision% || goto:build_error || EXIT /B 1
 call:checkout_keybase go-updater, %UpdaterRevision% || goto:build_error || EXIT /B 1
 call:checkout_keybase release, %ReleaseRevision% || goto:build_error || EXIT /B 1
 
@@ -55,38 +55,20 @@ if defined badbuildnumber (
 
 call %GOPATH%\src\github.com\keybase\client\packaging\windows\build_prerelease.cmd || goto:build_error || EXIT /B 1
 
-
-::RunQuiet Utility
-pushd %GOPATH%\src\github.com\keybase\client\go\tools\runquiet
-del rq.hash
-del old.hash
-powershell -command "wget https://s3.amazonaws.com/prerelease.keybase.io/windows-support/runquiet/runquiet.hash -OutFile old.hash"
-git log -1 -- runquiet.go > rq.hash
-fc rq.hash old.hash
-if %ERRORLEVEL% EQU 0 (
-    echo "downloading keybaserq"
-    powershell -command "wget https://s3.amazonaws.com/prerelease.keybase.io/windows-support/runquiet/keybaserq.exe -OutFile keybaserq.exe"
-) else (
-    echo "--- runquiet hashes differ, building keybaserq. Server hash: ---"
-    type old.hash
-    echo "--- Current hash: ---"
-    type rq.hash
-    call ..\..\..\packaging\windows\buildrq.bat || goto:build_error || EXIT /B 1
-)
-popd
-
-call %GOPATH%\src\github.com\keybase\client\packaging\windows\buildui.bat || goto:build_error || EXIT /B 1
+call %GOPATH%\src\github.com\keybase\client\packaging\windows\buildui.cmd || goto:build_error || EXIT /B 1
 
 ::Build Installer
 call %GOPATH%\src\github.com\keybase\client\packaging\windows\doinstaller_wix.cmd || goto:build_error || EXIT /B 1
 
 ::Publish to S3
 echo "Uploading %BUILD_TAG%"
-s3browser-con upload prerelease.keybase.io  %GOPATH%\src\github.com\keybase\client\packaging\windows\%BUILD_TAG%\Keybase_%BUILD_TAG%.386.msi prerelease.keybase.io/windows  || goto:build_error || EXIT /B 1
+s3browser-con upload prerelease.keybase.io  %GOPATH%\src\github.com\keybase\client\packaging\windows\%BUILD_TAG%\Keybase_%BUILD_TAG%.%GOARCH%.msi prerelease.keybase.io/windows  || goto:build_error || EXIT /B 1
 
 if %UpdateChannel% NEQ "None" (
     :: Test channel json
     s3browser-con upload prerelease.keybase.io  %GOPATH%\src\github.com\keybase\client\packaging\windows\%BUILD_TAG%\update-windows-prod-test-v2.json prerelease.keybase.io || goto:build_error || EXIT /B 1
+    echo "Creating index files"
+    %GOPATH%\src\github.com\keybase\release\release index-html --bucket-name=prerelease.keybase.io --prefixes="windows/" --upload="windows/index.html"
 ) else (
     echo "No update channel"
 )
@@ -124,8 +106,8 @@ set BUILD_TAG_ENCODED=!BUILD_TAG:+=%%2B!
 ::Publish smoke updater jsons to S3
 if [%UpdateChannel%] NEQ [Smoke2] (
     echo "Non Smoke2 build"
-    %OUTPUT% "Successfully built Windows with client: %KEYBASE_VERSION%, kbfs: %KBFS_BUILD%"
-    %OUTPUT% "https://prerelease.keybase.io/windows/Keybase_%BUILD_TAG_ENCODED%.386.msi"
+    %OUTPUT% "Successfully built Windows with client: %KEYBASE_VERSION%"
+    %OUTPUT% "https://prerelease.keybase.io/windows/Keybase_%BUILD_TAG_ENCODED%.%GOARCH%.msi"
     goto :no_smokeb
 )
 ::Smoke B json
@@ -134,7 +116,7 @@ set smokeBSemVer=%KEYBASE_VERSION%
 %GOPATH%\src\github.com\keybase\release\release announce-build --build-a="%SmokeASemVer%" --build-b="%smokeBSemVer%" --platform="windows" || goto:build_error || EXIT /B 1
 set BUILD_TAG_ENCODED=!SmokeASemVer:+=%%2B!
 %OUTPUT% "Successfully built Windows: --build-a=%SmokeASemVer% --build-b=%smokeBSemVer%
-%OUTPUT% "https://prerelease.keybase.io/windows/Keybase_%BUILD_TAG_ENCODED%.386.msi"
+%OUTPUT% "https://prerelease.keybase.io/windows/Keybase_%BUILD_TAG_ENCODED%.%GOARCH%.msi"
 :no_smokeb
 
 echo %ERRORLEVEL%
@@ -168,13 +150,11 @@ EXIT /B 1
 
 :check_ci 
 for /f %%i in ('git -C %GOPATH%\src\github.com\keybase\client rev-parse --short^=8 HEAD') do set clientCommit=%%i
-for /f %%i in ('git -C %GOPATH%\src\github.com\keybase\kbfs rev-parse --short^=8 HEAD') do set kbfsCommit=%%i
-echo [%clientCommit%] [%kbfsCommit%]
+echo [%clientCommit%]
 :: need GITHUB_TOKEN
 pushd %GOPATH%\src\github.com\keybase\release
 go build || goto:build_error || EXIT /B 1
 release wait-ci --repo="client" --commit="%clientCommit%" --context="continuous-integration/jenkins/branch" --context="ci/circleci"  || goto:ci_error
-release wait-ci --repo="kbfs" --commit="%kbfsCommit%" --context="continuous-integration/jenkins/branch" --context="ci/circleci"  || goto:ci_error
 popd
 EXIT /B 0
 

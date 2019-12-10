@@ -7,27 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
-	"strings"
+	"unicode/utf8"
 
+	"github.com/keybase/client/go/chat/msgchecker"
 	"github.com/keybase/client/go/libkb"
-	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/client/go/protocol/stellar1"
 	"github.com/keybase/client/go/stellar"
-	"github.com/keybase/client/go/stellar/relays"
+	airdrop "github.com/keybase/client/go/stellar/airdrop"
 	"github.com/keybase/client/go/stellar/remote"
 	"github.com/keybase/client/go/stellar/stellarcommon"
 	"github.com/keybase/stellarnet"
-	stellaramount "github.com/stellar/go/amount"
 )
 
 const WorthCurrencyErrorCode = "ERR"
-const ParticipantTypeKeybase = "keybase"
-const ParticipantTypeStellar = "stellar"
-const ParticipantTypeSBS = "sbs"
+
+var ErrAccountIDMissing = errors.New("account id parameter missing")
 
 func (s *Server) GetWalletAccountsLocal(ctx context.Context, sessionID int) (accts []stellar1.WalletAccountLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "GetWalletAccountsLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -37,47 +34,30 @@ func (s *Server) GetWalletAccountsLocal(ctx context.Context, sessionID int) (acc
 		return nil, err
 	}
 
-	bundle, _, err := remote.Fetch(ctx, s.G())
-	if err != nil {
-		return nil, err
-	}
+	return stellar.AllWalletAccounts(mctx, s.remoter)
+}
 
-	for _, account := range bundle.Accounts {
-		acct := stellar1.WalletAccountLocal{
-			AccountID: account.AccountID,
-			IsDefault: account.IsPrimary,
-			Name:      account.Name,
-		}
-
-		balances, err := s.remoter.Balances(ctx, acct.AccountID)
-		if err != nil {
-			s.G().Log.CDebugf(ctx, "remote.Balances failed for %q: %s", acct.AccountID, err)
-			return nil, err
-		}
-		acct.BalanceDescription, err = balanceList(balances).nativeBalanceDescription()
-		if err != nil {
-			return nil, err
-		}
-
-		accts = append(accts, acct)
-	}
-
-	// Put the primary account first, sort by name everything else
-	sort.SliceStable(accts, func(i, j int) bool {
-		if accts[i].IsDefault {
-			return true
-		}
-		if accts[j].IsDefault {
-			return false
-		}
-		return accts[i].Name < accts[j].Name
+func (s *Server) GetWalletAccountLocal(ctx context.Context, arg stellar1.GetWalletAccountLocalArg) (acct stellar1.WalletAccountLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "GetWalletAccountLocal",
+		Err:           &err,
+		RequireWallet: true,
 	})
+	defer fin()
+	if err != nil {
+		return acct, err
+	}
 
-	return accts, nil
+	if arg.AccountID.IsNil() {
+		mctx.Debug("GetWalletAccountLocal called with an empty account id")
+		return acct, ErrAccountIDMissing
+	}
+
+	return stellar.WalletAccount(mctx, s.remoter, arg.AccountID)
 }
 
 func (s *Server) GetAccountAssetsLocal(ctx context.Context, arg stellar1.GetAccountAssetsLocalArg) (assets []stellar1.AccountAssetLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName: "GetAccountAssetsLocal",
 		Err:     &err,
 	})
@@ -86,7 +66,12 @@ func (s *Server) GetAccountAssetsLocal(ctx context.Context, arg stellar1.GetAcco
 		return nil, err
 	}
 
-	details, err := s.remoter.Details(ctx, arg.AccountID)
+	if arg.AccountID.IsNil() {
+		s.G().Log.CDebugf(ctx, "GetAccountAssetsLocal called with an empty account id")
+		return nil, ErrAccountIDMissing
+	}
+
+	details, err := stellar.AccountDetails(mctx, s.remoter, arg.AccountID)
 	if err != nil {
 		s.G().Log.CDebugf(ctx, "remote.Details failed for %q: %s", arg.AccountID, err)
 		return nil, err
@@ -95,85 +80,124 @@ func (s *Server) GetAccountAssetsLocal(ctx context.Context, arg stellar1.GetAcco
 	if len(details.Balances) == 0 {
 		// add an empty xlm balance
 		s.G().Log.CDebugf(ctx, "Account has no balances - adding default 0 XLM balance")
+		stellar.EmptyAmountStack(mctx)
+		details.Available = "0"
 		details.Balances = []stellar1.Balance{
-			stellar1.Balance{
+			{
 				Amount: "0",
 				Asset:  stellar1.Asset{Type: "native"},
 			},
 		}
 	}
 
-	displayCurrency, err := remote.GetAccountDisplayCurrency(ctx, s.G(), arg.AccountID)
+	if details.Available == "" {
+		s.G().Log.CDebugf(ctx, "details.Available is empty: %+v", details)
+		stellar.EmptyAmountStack(mctx)
+		details.Available = "0"
+		s.G().Log.CDebugf(ctx, `set details.Available from empty to "0"`)
+	}
+
+	displayCurrency, err := stellar.GetAccountDisplayCurrency(mctx, arg.AccountID)
 	if err != nil {
 		return nil, err
 	}
 	s.G().Log.CDebugf(ctx, "Display currency for account %q is %q", arg.AccountID, displayCurrency)
-	if displayCurrency == "" {
-		displayCurrency = defaultOutsideCurrency
-		s.G().Log.CDebugf(ctx, "Using default display currency %s for account %s", displayCurrency, arg.AccountID)
-	}
 	rate, rateErr := s.remoter.ExchangeRate(ctx, displayCurrency)
-	if err != nil {
+	if rateErr != nil {
 		s.G().Log.CDebugf(ctx, "exchange rate error: %s", rateErr)
 	}
 
 	for _, d := range details.Balances {
-		// M1 only supports native balances
-		if d.Asset.Type != "native" {
-			continue
-		}
-
-		fmtAmount, err := stellar.FormatAmount(d.Amount, false)
+		fmtAmount, err := stellar.FormatAmount(mctx, d.Amount, false, stellarnet.Round)
 		if err != nil {
 			s.G().Log.CDebugf(ctx, "FormatAmount error: %s", err)
 			return nil, err
 		}
-		asset := stellar1.AccountAssetLocal{
-			Name:         d.Asset.Type,
-			BalanceTotal: fmtAmount,
-			AssetCode:    d.Asset.Code,
-			Issuer:       d.Asset.Issuer,
-		}
 
-		if d.Asset.Type == "native" {
-			asset.Name = "Lumens"
-			asset.AssetCode = "XLM"
-			asset.Issuer = "Stellar"
-			fmtAvailable, err := stellar.FormatAmount(details.Available, false)
+		if d.Asset.IsNativeXLM() {
+			baseFee := s.walletState.BaseFee(mctx)
+			availableAmount := stellar.SubtractFeeSoft(mctx, details.Available, baseFee)
+			if availableAmount == "" {
+				s.G().Log.CDebugf(ctx, "stellar.SubtractFeeSoft returned empty available amount, setting it to 0")
+				stellar.EmptyAmountStack(mctx)
+				availableAmount = "0"
+			}
+			fmtAvailable, err := stellar.FormatAmount(mctx, availableAmount, false, stellarnet.Round)
 			if err != nil {
 				return nil, err
 			}
-			asset.BalanceAvailableToSend = fmtAvailable
-			asset.WorthCurrency = displayCurrency
 
-			var displayAmount string
-			if rateErr == nil {
-				displayAmount, rateErr = stellarnet.ConvertXLMToOutside(d.Amount, rate.Rate)
+			asset := stellar1.AccountAssetLocal{
+				Name:                   "Lumens",
+				AssetCode:              "XLM",
+				IssuerName:             "Stellar network",
+				IssuerAccountID:        "",
+				BalanceTotal:           fmtAmount,
+				BalanceAvailableToSend: fmtAvailable,
+				WorthCurrency:          displayCurrency,
 			}
-			if rateErr != nil {
-				s.G().Log.CDebugf(ctx, "error converting XLM to display currency: %s", rateErr)
-				asset.Worth = "Currency conversion error"
-				asset.WorthCurrency = WorthCurrencyErrorCode
-			} else {
-				displayFormatted, err := stellar.FormatCurrency(ctx, s.G(), displayAmount, stellar1.OutsideCurrencyCode(displayCurrency))
-				if err != nil {
-					s.G().Log.CDebugf(ctx, "error formatting currency: %s", err)
-					asset.Worth = "Currency conversion error"
-					asset.WorthCurrency = WorthCurrencyErrorCode
-				} else {
-					asset.Worth = displayFormatted
+			fillWorths := func() (err error) {
+				if rateErr != nil {
+					return fmt.Errorf("rate error: %v", rateErr)
 				}
+				outsideAmount, err := stellarnet.ConvertXLMToOutside(d.Amount, rate.Rate)
+				if err != nil {
+					return fmt.Errorf("converting amount: %v", err)
+				}
+				fmtWorth, err := stellar.FormatCurrencyWithCodeSuffix(mctx, outsideAmount, rate.Currency, stellarnet.Round)
+				if err != nil {
+					return fmt.Errorf("formatting converted amount: %v", err)
+				}
+				asset.Worth = fmtWorth
+				outsideAvailableAmount, err := stellarnet.ConvertXLMToOutside(availableAmount, rate.Rate)
+				if err != nil {
+					return fmt.Errorf("converting available amount: %v", err)
+				}
+				fmtAvailableWorth, err := stellar.FormatCurrencyWithCodeSuffix(mctx, outsideAvailableAmount, rate.Currency, stellarnet.Round)
+				if err != nil {
+					return fmt.Errorf("formatting converted available amount: %v", err)
+				}
+				asset.AvailableToSendWorth = fmtAvailableWorth
+				return nil
 			}
+			err = fillWorths()
+			if err != nil {
+				s.G().Log.CDebugf(ctx, "error populating converted worth fields: %v", err)
+				asset.WorthCurrency = WorthCurrencyErrorCode
+				asset.Worth = "Currency conversion error"
+				asset.AvailableToSendWorth = "Currency conversion error"
+			}
+			// Add account reserves info to main asset.
+			asset.Reserves = details.Reserves
+			assets = append(assets, asset)
+		} else {
+			assets = append(assets, stellar1.AccountAssetLocal{
+				Name:                   d.Asset.Code,
+				AssetCode:              d.Asset.Code,
+				IssuerName:             d.Asset.IssuerName,
+				IssuerAccountID:        d.Asset.Issuer,
+				IssuerVerifiedDomain:   d.Asset.VerifiedDomain,
+				BalanceTotal:           fmtAmount,
+				BalanceAvailableToSend: fmtAmount,
+				WorthCurrency:          "",
+				Worth:                  "",
+				AvailableToSendWorth:   "",
+				Desc:                   d.Asset.Desc,
+				InfoUrl:                d.Asset.InfoUrl,
+				InfoUrlText:            d.Asset.InfoUrlText,
+				ShowDepositButton:      d.Asset.ShowDepositButton,
+				DepositButtonText:      d.Asset.DepositButtonText,
+				ShowWithdrawButton:     d.Asset.ShowWithdrawButton,
+				WithdrawButtonText:     d.Asset.WithdrawButtonText,
+			})
 		}
-
-		assets = append(assets, asset)
 	}
 
 	return assets, nil
 }
 
 func (s *Server) GetDisplayCurrenciesLocal(ctx context.Context, sessionID int) (currencies []stellar1.CurrencyLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName: "GetDisplayCurrenciesLocal",
 		Err:     &err,
 	})
@@ -182,7 +206,7 @@ func (s *Server) GetDisplayCurrenciesLocal(ctx context.Context, sessionID int) (
 		return nil, err
 	}
 
-	conf, err := s.G().GetStellar().GetServerDefinitions(ctx)
+	conf, err := s.G().GetStellar().GetServerDefinitions(mctx.Ctx())
 	if err != nil {
 		return nil, err
 	}
@@ -206,38 +230,52 @@ func (s *Server) GetDisplayCurrenciesLocal(ctx context.Context, sessionID int) (
 	return currencies, nil
 }
 
-func (s *Server) GetWalletSettingsLocal(ctx context.Context, sessionID int) (ret stellar1.WalletSettings, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
-		RPCName: "GetWalletSettingsLocal",
+func (s *Server) HasAcceptedDisclaimerLocal(ctx context.Context, sessionID int) (accepted bool, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "HasAcceptedDisclaimerLocal",
 		Err:     &err,
 	})
 	defer fin()
 	if err != nil {
-		return ret, err
+		return false, err
 	}
-	ret.AcceptedDisclaimer, err = remote.GetAcceptedDisclaimer(ctx, s.G())
-	if err != nil {
-		return ret, err
-	}
-	return ret, nil
+
+	return stellar.HasAcceptedDisclaimer(mctx.Ctx(), s.G())
 }
 
-func (s *Server) SetAcceptedDisclaimerLocal(ctx context.Context, sessionID int) (err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
-		RPCName:       "SetAcceptedDisclaimerLocal",
-		Err:           &err,
-		RequireWallet: true,
+func (s *Server) AcceptDisclaimerLocal(ctx context.Context, sessionID int) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "AcceptDisclaimerLocal",
+		Err:     &err,
 	})
 	defer fin()
 	if err != nil {
 		return err
 	}
 
-	return remote.SetAcceptedDisclaimer(ctx, s.G())
+	err = remote.SetAcceptedDisclaimer(mctx.Ctx(), s.G())
+	if err != nil {
+		return err
+	}
+	stellar.InformAcceptedDisclaimer(mctx.Ctx(), s.G())
+	cwg, err := stellar.CreateWalletGated(mctx)
+	if err != nil {
+		return err
+	}
+	if !cwg.HasWallet {
+		return fmt.Errorf("user wallet not created")
+	}
+
+	err = s.walletState.RefreshAll(mctx, "AcceptDisclaimer")
+	if err != nil {
+		mctx.Debug("AcceptDisclaimer RefreshAll error: %s", err)
+	}
+
+	return nil
 }
 
 func (s *Server) LinkNewWalletAccountLocal(ctx context.Context, arg stellar1.LinkNewWalletAccountLocalArg) (accountID stellar1.AccountID, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "LinkNewWalletAccountLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -252,16 +290,21 @@ func (s *Server) LinkNewWalletAccountLocal(ctx context.Context, arg stellar1.Lin
 		return "", err
 	}
 
-	err = stellar.ImportSecretKey(ctx, s.G(), arg.SecretKey, false, arg.Name)
+	err = stellar.ImportSecretKey(mctx, arg.SecretKey, false, arg.Name)
 	if err != nil {
 		return "", err
+	}
+
+	err = s.walletState.RefreshAll(mctx, "LinkNewWalletAccount")
+	if err != nil {
+		mctx.Debug("LinkNewWalletAccountLocal RefreshAll error: %s", err)
 	}
 
 	return accountID, nil
 }
 
 func (s *Server) GetPaymentsLocal(ctx context.Context, arg stellar1.GetPaymentsLocalArg) (page stellar1.PaymentsPageLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "GetPaymentsLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -271,291 +314,262 @@ func (s *Server) GetPaymentsLocal(ctx context.Context, arg stellar1.GetPaymentsL
 		return page, err
 	}
 
-	srvPayments, err := s.remoter.RecentPayments(ctx, arg.AccountID, arg.Cursor, 0)
+	if arg.AccountID.IsNil() {
+		s.G().Log.CDebugf(ctx, "GetPaymentsLocal called with an empty account id")
+		return page, ErrAccountIDMissing
+	}
+
+	rpArg := remote.RecentPaymentsArg{
+		AccountID:       arg.AccountID,
+		Cursor:          arg.Cursor,
+		SkipPending:     true,
+		IncludeAdvanced: true,
+	}
+	srvPayments, err := s.remoter.RecentPayments(ctx, rpArg)
 	if err != nil {
 		return page, err
 	}
-	page.Payments = make([]stellar1.PaymentOrErrorLocal, len(srvPayments.Payments))
-	for i, p := range srvPayments.Payments {
-		page.Payments[i].Payment, err = s.transformPaymentSummary(ctx, arg.AccountID, p)
-		if err != nil {
-			s := err.Error()
-			page.Payments[i].Err = &s
-			page.Payments[i].Payment = nil // just to make sure
-		}
-	}
-	page.Cursor = srvPayments.Cursor
 
-	return page, nil
+	return stellar.RemoteRecentPaymentsToPage(mctx, s.remoter, arg.AccountID, srvPayments)
+}
+
+func (s *Server) GetPendingPaymentsLocal(ctx context.Context, arg stellar1.GetPendingPaymentsLocalArg) (payments []stellar1.PaymentOrErrorLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "GetPendingPaymentsLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return nil, err
+	}
+
+	if arg.AccountID.IsNil() {
+		s.G().Log.CDebugf(ctx, "GetPendingPaymentsLocal called with an empty account id")
+		return payments, ErrAccountIDMissing
+	}
+
+	pending, err := s.remoter.PendingPayments(ctx, arg.AccountID, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	return stellar.RemotePendingToLocal(mctx, s.remoter, arg.AccountID, pending)
 }
 
 func (s *Server) GetPaymentDetailsLocal(ctx context.Context, arg stellar1.GetPaymentDetailsLocalArg) (payment stellar1.PaymentDetailsLocal, err error) {
-	ctx = s.logTag(ctx)
-	defer s.G().CTraceTimed(ctx, "GetPaymentDetailsLocal", func() error { return err })()
-	err = s.assertLoggedIn(ctx)
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "GetPaymentDetailsLocal",
+		Err:     &err,
+	})
+	defer fin()
 	if err != nil {
 		return payment, err
 	}
 
-	details, err := s.remoter.PaymentDetails(ctx, arg.Id.String())
+	if arg.AccountID.IsNil() {
+		return payment, errors.New("AccountID required for GetPaymentDetailsLocal")
+	}
+
+	oc := stellar.NewOwnAccountLookupCache(mctx)
+	details, err := s.remoter.PaymentDetails(ctx, arg.AccountID, stellar1.TransactionIDFromPaymentID(arg.Id).String())
 	if err != nil {
 		return payment, err
 	}
 
-	summary, err := s.transformPaymentSummary(ctx, arg.AccountID, details.Summary)
+	summary, err := stellar.TransformPaymentSummaryAccount(mctx, details.Summary, oc, arg.AccountID)
 	if err != nil {
 		return payment, err
 	}
 
-	payment = stellar1.PaymentDetailsLocal{
-		Id:                summary.Id,
-		Time:              summary.Time,
-		StatusSimplified:  summary.StatusSimplified,
-		StatusDescription: summary.StatusDescription,
-		StatusDetail:      summary.StatusDetail,
-		AmountDescription: summary.AmountDescription,
-		Delta:             summary.Delta,
-		Worth:             summary.Worth,
-		WorthCurrency:     summary.WorthCurrency,
-		Source:            summary.Source,
-		SourceType:        summary.SourceType,
-		Target:            summary.Target,
-		TargetType:        summary.TargetType,
-		Note:              summary.Note,
-		NoteErr:           summary.NoteErr,
-		PublicNote:        details.Memo,
-		PublicNoteType:    details.MemoType,
-	}
-
-	return payment, nil
-}
-
-func (s *Server) transformPaymentSummary(ctx context.Context, acctID stellar1.AccountID, p stellar1.PaymentSummary) (*stellar1.PaymentLocal, error) {
-	typ, err := p.Typ()
-	if err != nil {
-		return nil, err
-	}
-
-	switch typ {
-	case stellar1.PaymentSummaryType_STELLAR:
-		return s.transformPaymentStellar(ctx, acctID, p.Stellar())
-	case stellar1.PaymentSummaryType_DIRECT:
-		return s.transformPaymentDirect(ctx, acctID, p.Direct())
-	case stellar1.PaymentSummaryType_RELAY:
-		return s.transformPaymentRelay(ctx, acctID, p.Relay())
-	default:
-		return nil, fmt.Errorf("unrecognized payment type: %s", typ)
-	}
-}
-
-func (s *Server) transformPaymentStellar(ctx context.Context, acctID stellar1.AccountID, p stellar1.PaymentSummaryStellar) (*stellar1.PaymentLocal, error) {
-	loc, err := newPaymentLocal(p.TxID, p.Ctime, p.Amount, p.From, p.To, acctID)
-	if err != nil {
-		return nil, err
-	}
-
-	loc.Source = p.From.String()
-	loc.SourceType = ParticipantTypeStellar
-	loc.Target = p.To.String()
-	loc.TargetType = ParticipantTypeStellar
-
-	loc.StatusSimplified = stellar1.PaymentStatus_COMPLETED
-	loc.StatusDescription = strings.ToLower(loc.StatusSimplified.String())
-
-	return loc, nil
-}
-
-func (s *Server) transformPaymentDirect(ctx context.Context, acctID stellar1.AccountID, p stellar1.PaymentSummaryDirect) (*stellar1.PaymentLocal, error) {
-	loc, err := newPaymentLocal(p.TxID, p.Ctime, p.Amount, p.FromStellar, p.ToStellar, acctID)
-	if err != nil {
-		return nil, err
-	}
-
-	loc.Worth, loc.WorthCurrency, err = s.formatWorth(ctx, p.DisplayAmount, p.DisplayCurrency)
-	if err != nil {
-		return nil, err
-	}
-
-	loc.Source, loc.SourceType = s.lookupUsernameFallback(ctx, p.From.Uid, p.FromStellar)
-
-	if p.To != nil {
-		loc.Target, loc.TargetType = s.lookupUsernameFallback(ctx, p.To.Uid, p.ToStellar)
-	}
-
-	loc.StatusSimplified = p.TxStatus.ToPaymentStatus()
-	loc.StatusDescription = strings.ToLower(loc.StatusSimplified.String())
-	loc.StatusDetail = p.TxErrMsg
-
-	loc.Note, loc.NoteErr = s.decryptNote(ctx, p.TxID, p.NoteB64)
-
-	return loc, nil
-}
-
-func (s *Server) transformPaymentRelay(ctx context.Context, acctID stellar1.AccountID, p stellar1.PaymentSummaryRelay) (*stellar1.PaymentLocal, error) {
-	var toStellar stellar1.AccountID
-	if p.Claim != nil {
-		toStellar = p.Claim.ToStellar
-	}
-	loc, err := newPaymentLocal(p.TxID, p.Ctime, p.Amount, p.FromStellar, toStellar, acctID)
-	if err != nil {
-		return nil, err
-	}
-
-	loc.Worth, loc.WorthCurrency, err = s.formatWorth(ctx, p.DisplayAmount, p.DisplayCurrency)
-	if err != nil {
-		return nil, err
-	}
-
-	loc.Source, loc.SourceType = s.lookupUsernameFallback(ctx, p.From.Uid, p.FromStellar)
-
-	if p.To != nil {
-		name, err := s.lookupUsername(ctx, p.To.Uid)
+	var fee string
+	if details.FeeCharged != "" {
+		fee, err = stellar.FormatAmountDescriptionXLM(mctx, details.FeeCharged)
 		if err != nil {
-			s.G().Log.CDebugf(ctx, "recipient lookup failed: %s", err)
-			return nil, errors.New("recipient lookup failed")
-		}
-		loc.Target = name
-		loc.TargetType = ParticipantTypeKeybase
-	} else {
-		loc.Target = p.ToAssertion
-		loc.TargetType = ParticipantTypeSBS
-	}
-
-	if p.TxStatus != stellar1.TransactionStatus_SUCCESS {
-		// If the funding tx is not complete
-		loc.StatusSimplified = p.TxStatus.ToPaymentStatus()
-		loc.StatusDetail = p.TxErrMsg
-	} else {
-		loc.StatusSimplified = stellar1.PaymentStatus_CLAIMABLE
-		loc.StatusDetail = "Waiting for the recipient to open the app to claim, or the sender to cancel."
-	}
-	if p.Claim != nil {
-		loc.StatusSimplified = p.Claim.TxStatus.ToPaymentStatus()
-		if p.Claim.TxStatus == stellar1.TransactionStatus_SUCCESS {
-			// If the claim succeeded, the relay payment is done.
-			name, err := s.lookupUsername(ctx, p.Claim.To.Uid)
-			if err == nil {
-				loc.Target = name
-				loc.TargetType = ParticipantTypeKeybase
-			} else {
-				loc.Target = p.Claim.ToStellar.String()
-				loc.TargetType = ParticipantTypeStellar
-			}
-		} else {
-			claimantUsername, err := s.lookupUsername(ctx, p.Claim.To.Uid)
-			if err != nil {
-				return nil, err
-			}
-			if p.Claim.TxErrMsg != "" {
-				loc.StatusDetail = p.Claim.TxErrMsg
-			} else {
-				loc.StatusDetail = fmt.Sprintf("funded. Claim by %v is: %v", claimantUsername, loc.StatusSimplified.String())
-			}
+			return payment, err
 		}
 	}
-	loc.StatusDescription = strings.ToLower(loc.StatusSimplified.String())
 
-	relaySecrets, err := relays.DecryptB64(ctx, s.G(), p.TeamID, p.BoxB64)
-	if err == nil {
-		loc.Note = relaySecrets.Note
-	} else {
-		loc.NoteErr = fmt.Sprintf("error decrypting note: %s", err)
-	}
+	summary.TxID = stellar1.TransactionIDFromPaymentID(summary.Id)
 
-	return loc, nil
+	return stellar1.PaymentDetailsLocal{
+		Summary: *summary,
+		Details: stellar1.PaymentDetailsOnlyLocal{
+			PublicNote:            details.Memo,
+			PublicNoteType:        details.MemoType,
+			ExternalTxURL:         details.ExternalTxURL,
+			FeeChargedDescription: fee,
+			PathIntermediate:      details.PathIntermediate,
+		},
+	}, nil
 }
 
-func (s *Server) lookupUsernameFallback(ctx context.Context, uid keybase1.UID, acctID stellar1.AccountID) (name, kind string) {
-	name, err := s.lookupUsername(ctx, uid)
-	if err == nil {
-		return name, ParticipantTypeKeybase
-	}
-	return acctID.String(), ParticipantTypeStellar
-}
-
-func (s *Server) lookupUsername(ctx context.Context, uid keybase1.UID) (string, error) {
-	uname, err := s.G().GetUPAKLoader().LookupUsername(ctx, uid)
+func (s *Server) GetGenericPaymentDetailsLocal(ctx context.Context, arg stellar1.GetGenericPaymentDetailsLocalArg) (payment stellar1.PaymentDetailsLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "GetGenericPaymentDetailsLocal",
+		Err:     &err,
+	})
+	defer fin()
 	if err != nil {
-		return "", err
-	}
-	return uname.String(), nil
-}
-
-func (s *Server) formatWorth(ctx context.Context, amount, currency *string) (worth, worthCurrency string, err error) {
-	if amount == nil || currency == nil {
-		return "", "", nil
+		return payment, err
 	}
 
-	if len(*amount) == 0 || len(*currency) == 0 {
-		return "", "", nil
-	}
-
-	worth, err = stellar.FormatCurrency(ctx, s.G(), *amount, stellar1.OutsideCurrencyCode(*currency))
+	oc := stellar.NewOwnAccountLookupCache(mctx)
+	details, err := s.remoter.PaymentDetailsGeneric(ctx, stellar1.TransactionIDFromPaymentID(arg.Id).String())
 	if err != nil {
-		return "", "", err
+		return payment, err
 	}
 
-	return worth, *currency, nil
-}
-
-func (s *Server) decryptNote(ctx context.Context, txid stellar1.TransactionID, note string) (plaintext, errOutput string) {
-	if len(note) == 0 {
-		return "", ""
-	}
-
-	decrypted, err := stellar.NoteDecryptB64(ctx, s.G(), note)
+	summary, err := stellar.TransformPaymentSummaryGeneric(mctx, details.Summary, oc)
 	if err != nil {
-		return "", fmt.Sprintf("failed to decrypt payment note: %s", err)
+		return payment, err
 	}
 
-	if decrypted.StellarID != txid {
-		return "", "discarded note for wrong transaction ID"
-	}
+	summary.TxID = stellar1.TransactionIDFromPaymentID(summary.Id)
 
-	return decrypted.Note, ""
+	return stellar1.PaymentDetailsLocal{
+		Summary: *summary,
+		Details: stellar1.PaymentDetailsOnlyLocal{
+			PublicNote:     details.Memo,
+			PublicNoteType: details.MemoType,
+			ExternalTxURL:  details.ExternalTxURL,
+		},
+	}, nil
 }
 
-type balanceList []stellar1.Balance
+func (s *Server) CancelPaymentLocal(ctx context.Context, arg stellar1.CancelPaymentLocalArg) (res stellar1.RelayClaimResult, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "CancelPaymentLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
 
-func (a balanceList) nativeBalanceDescription() (string, error) {
-	for _, b := range a {
-		if b.Asset.IsNativeXLM() {
-			return stellar.FormatAmountXLM(b.Amount)
+	details, err := s.remoter.PaymentDetailsGeneric(mctx.Ctx(), stellar1.TransactionIDFromPaymentID(arg.PaymentID).String())
+	if err != nil {
+		return res, err
+	}
+	typ, err := details.Summary.Typ()
+	if err != nil {
+		return res, err
+	}
+	if typ != stellar1.PaymentSummaryType_RELAY {
+		return res, errors.New("tried to cancel a non-relay payment")
+	}
+	relay := details.Summary.Relay()
+	dir := stellar1.RelayDirection_YANK
+	return stellar.Claim(mctx, s.walletState, relay.KbTxID.String(), relay.FromStellar, &dir, nil)
+}
+
+func (s *Server) ValidateAccountIDLocal(ctx context.Context, arg stellar1.ValidateAccountIDLocalArg) (err error) {
+	_, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "ValidateAccountIDLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	_, err = libkb.ParseStellarAccountID(arg.AccountID.String())
+	return err
+}
+
+func (s *Server) ValidateSecretKeyLocal(ctx context.Context, arg stellar1.ValidateSecretKeyLocalArg) (err error) {
+	_, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "ValidateSecretKeyLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	_, _, _, err = libkb.ParseStellarSecretKey(arg.SecretKey.SecureNoLogString())
+	return err
+}
+
+func (s *Server) ValidateAccountNameLocal(ctx context.Context, arg stellar1.ValidateAccountNameLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "ValidateAccountNameLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	// Make sure to keep this validation in sync with ChangeAccountName.
+	if arg.Name == "" {
+		return fmt.Errorf("name required")
+	}
+	runes := utf8.RuneCountInString(arg.Name)
+	if runes > stellar.AccountNameMaxRunes {
+		return fmt.Errorf("account name can be %v characters at the longest but was %v", stellar.AccountNameMaxRunes, runes)
+	}
+	// If this becomes a bottleneck, cache non-critical wallet info on G.Stellar.
+	currentBundle, err := remote.FetchSecretlessBundle(mctx)
+	if err != nil {
+		s.G().Log.CErrorf(ctx, "error fetching bundle: %v", err)
+		// Return nil since the name is probably fine.
+		return nil
+	}
+	for _, account := range currentBundle.Accounts {
+		if arg.Name == account.Name {
+			return fmt.Errorf("you already have an account with that name")
 		}
 	}
-	return "0 XLM", nil
+	return nil
 }
 
-func (s *Server) ChangeWalletAccountNameLocal(ctx context.Context, arg stellar1.ChangeWalletAccountNameLocalArg) (err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+func (s *Server) ChangeWalletAccountNameLocal(ctx context.Context, arg stellar1.ChangeWalletAccountNameLocalArg) (acct stellar1.WalletAccountLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "ChangeWalletAccountNameLocal",
 		Err:           &err,
 		RequireWallet: true,
 	})
 	defer fin()
 	if err != nil {
-		return err
+		return acct, err
 	}
 
-	return stellar.ChangeAccountName(s.mctx(ctx), arg.AccountID, arg.NewName)
+	if arg.AccountID.IsNil() {
+		mctx.Debug("ChangeWalletAccountNameLocal called with an empty account id")
+		return acct, ErrAccountIDMissing
+	}
+
+	err = stellar.ChangeAccountName(mctx, s.walletState, arg.AccountID, arg.NewName)
+	if err != nil {
+		return acct, err
+	}
+	return stellar.WalletAccount(mctx, s.remoter, arg.AccountID)
 }
 
-func (s *Server) SetWalletAccountAsDefaultLocal(ctx context.Context, arg stellar1.SetWalletAccountAsDefaultLocalArg) (err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+func (s *Server) SetWalletAccountAsDefaultLocal(ctx context.Context, arg stellar1.SetWalletAccountAsDefaultLocalArg) (accts []stellar1.WalletAccountLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "SetWalletAccountAsDefaultLocal",
 		Err:           &err,
 		RequireWallet: true,
 	})
 	defer fin()
 	if err != nil {
-		return err
+		return accts, err
 	}
 
-	return stellar.SetAccountAsPrimary(s.mctx(ctx), arg.AccountID)
+	if arg.AccountID.IsNil() {
+		mctx.Debug("SetWalletAccountAsDefaultLocal called with an empty account id")
+		return accts, ErrAccountIDMissing
+	}
+
+	err = stellar.SetAccountAsPrimary(mctx, s.walletState, arg.AccountID)
+	if err != nil {
+		return accts, err
+	}
+	return stellar.AllWalletAccounts(mctx, s.remoter)
 }
 
 func (s *Server) DeleteWalletAccountLocal(ctx context.Context, arg stellar1.DeleteWalletAccountLocalArg) (err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "DeleteWalletAccountLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -569,46 +583,58 @@ func (s *Server) DeleteWalletAccountLocal(ctx context.Context, arg stellar1.Dele
 		return errors.New("User did not acknowledge")
 	}
 
-	return stellar.DeleteAccount(s.mctx(ctx), arg.AccountID)
+	if arg.AccountID.IsNil() {
+		mctx.Debug("DeleteWalletAccountLocal called with an empty account id")
+		return ErrAccountIDMissing
+	}
+
+	return stellar.DeleteAccount(mctx, arg.AccountID)
 }
 
-func (s *Server) ChangeDisplayCurrencyLocal(ctx context.Context, arg stellar1.ChangeDisplayCurrencyLocalArg) (err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+func (s *Server) ChangeDisplayCurrencyLocal(ctx context.Context, arg stellar1.ChangeDisplayCurrencyLocalArg) (res stellar1.CurrencyLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "ChangeDisplayCurrencyLocal",
 		Err:           &err,
 		RequireWallet: true,
 	})
 	defer fin()
 	if err != nil {
-		return err
+		return res, err
 	}
 
 	if arg.AccountID.IsNil() {
-		return errors.New("passed empty AccountID")
+		return res, ErrAccountIDMissing
 	}
-	conf, err := s.G().GetStellar().GetServerDefinitions(ctx)
+	err = remote.SetAccountDefaultCurrency(mctx.Ctx(), s.G(), arg.AccountID, string(arg.Currency))
 	if err != nil {
-		return err
+		return res, err
 	}
-	if _, ok := conf.Currencies[arg.Currency]; !ok {
-		return fmt.Errorf("Unknown currency code: %q", arg.Currency)
-	}
-	return remote.SetAccountDefaultCurrency(ctx, s.G(), arg.AccountID, string(arg.Currency))
+	return stellar.GetCurrencySetting(mctx, arg.AccountID)
 }
 
 func (s *Server) GetDisplayCurrencyLocal(ctx context.Context, arg stellar1.GetDisplayCurrencyLocalArg) (res stellar1.CurrencyLocal, err error) {
-	defer s.G().CTraceTimed(ctx, "GetDisplayCurrencyLocal", func() error { return err })()
-	if err = s.assertLoggedIn(ctx); err != nil {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "GetDisplayCurrencyLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
 		return res, err
 	}
-	if arg.AccountID.IsNil() {
-		return res, errors.New("passed empty AccountID")
+
+	accountID := arg.AccountID
+	if accountID == nil {
+		primaryAccountID, err := stellar.GetOwnPrimaryAccountID(mctx)
+		if err != nil {
+			return res, err
+		}
+		accountID = &primaryAccountID
 	}
-	return stellar.GetCurrencySetting(s.mctx(ctx), s.remoter, arg.AccountID)
+	return stellar.GetCurrencySetting(mctx, *accountID)
 }
 
 func (s *Server) GetWalletAccountPublicKeyLocal(ctx context.Context, arg stellar1.GetWalletAccountPublicKeyLocalArg) (res string, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	_, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:        "GetWalletAccountPublicKeyLocal",
 		Err:            &err,
 		AllowLoggedOut: true,
@@ -619,13 +645,13 @@ func (s *Server) GetWalletAccountPublicKeyLocal(ctx context.Context, arg stellar
 	}
 
 	if arg.AccountID.IsNil() {
-		return res, errors.New("passed empty AccountID")
+		return res, ErrAccountIDMissing
 	}
 	return arg.AccountID.String(), nil
 }
 
 func (s *Server) GetWalletAccountSecretKeyLocal(ctx context.Context, arg stellar1.GetWalletAccountSecretKeyLocalArg) (res stellar1.SecretKey, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "GetWalletAccountSecretKeyLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -636,13 +662,13 @@ func (s *Server) GetWalletAccountSecretKeyLocal(ctx context.Context, arg stellar
 	}
 
 	if arg.AccountID.IsNil() {
-		return res, errors.New("passed empty AccountID")
+		return res, ErrAccountIDMissing
 	}
-	return stellar.ExportSecretKey(ctx, s.G(), arg.AccountID)
+	return stellar.ExportSecretKey(mctx, arg.AccountID)
 }
 
 func (s *Server) GetSendAssetChoicesLocal(ctx context.Context, arg stellar1.GetSendAssetChoicesLocalArg) (res []stellar1.SendAssetChoiceLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "GetSendAssetChoicesLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -652,12 +678,38 @@ func (s *Server) GetSendAssetChoicesLocal(ctx context.Context, arg stellar1.GetS
 		return res, err
 	}
 
-	// Not implemented. CORE-8087
-	return res, fmt.Errorf("GetSendAssetChoicesLocal not implemented")
+	return stellar.GetSendAssetChoicesLocal(mctx, s.remoter, arg)
+}
+
+func (s *Server) StartBuildPaymentLocal(ctx context.Context, sessionID int) (res stellar1.BuildPaymentID, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "StartBuildPaymentLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+	return stellar.StartBuildPaymentLocal(mctx)
+}
+
+func (s *Server) StopBuildPaymentLocal(ctx context.Context, arg stellar1.StopBuildPaymentLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "StopBuildPaymentLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	stellar.StopBuildPaymentLocal(mctx, arg.Bid)
+	return nil
 }
 
 func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymentLocalArg) (res stellar1.BuildPaymentResLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "BuildPaymentLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -666,355 +718,24 @@ func (s *Server) BuildPaymentLocal(ctx context.Context, arg stellar1.BuildPaymen
 	if err != nil {
 		return res, err
 	}
-
-	tracer := s.G().CTimeTracer(ctx, "BuildPaymentLocal", true)
-	defer tracer.Finish()
-
-	readyChecklist := struct {
-		from       bool
-		to         bool
-		amount     bool
-		secretNote bool
-		publicMemo bool
-	}{}
-	uis := libkb.UIs{
-		IdentifyUI: s.uiSource.IdentifyUI(s.G(), arg.SessionID),
-	}
-	log := func(format string, args ...interface{}) {
-		s.G().Log.CDebugf(ctx, "bpl: "+format, args...)
-	}
-
-	bpc := stellar.GetBuildPaymentCache(s.mctx(ctx), s.remoter)
-	if bpc == nil {
-		return res, fmt.Errorf("missing build payment cache")
-	}
-
-	// -------------------- from --------------------
-
-	tracer.Stage("from")
-	fromInfo := struct {
-		available bool
-		from      stellar1.AccountID
-	}{}
-	owns, err := bpc.OwnsAccount(s.mctx(ctx), arg.From)
-	if err != nil || !owns {
-		log("UserOwnsAccount -> owns:%v err:%v", owns, err)
-		res.Banners = append(res.Banners, stellar1.SendBannerLocal{
-			Level:   "error",
-			Message: "Could not find source account.",
-		})
-	} else {
-		fromInfo.from = arg.From
-		fromInfo.available = true
-		if arg.FromSeqno == "" {
-			readyChecklist.from = true
-		} else {
-			// Check that the seqno of the account matches the caller's expectation.
-			seqno, err := bpc.AccountSeqno(s.mctx(ctx), arg.From)
-			switch {
-			case err != nil:
-				log("AccountSeqno -> err:%v", err)
-				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
-					Level:   "error",
-					Message: "Could not get seqno for source account.",
-				})
-			case seqno != arg.FromSeqno:
-				log("AccountSeqno -> got:%v != want:%v", seqno, arg.FromSeqno)
-				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
-					Level:   "error",
-					Message: "Activity on account since initiating send. Take another look at account history.",
-				})
-			default:
-				readyChecklist.from = true
-				fromInfo.from = arg.From
-				fromInfo.available = true
-			}
-		}
-	}
-
-	// -------------------- to --------------------
-
-	tracer.Stage("to")
-	var skipRecipient bool
-	var minAmountXLM string
-	if arg.ToIsAccountID {
-		_, err := libkb.ParseStellarAccountID(arg.To)
-		if err != nil {
-			res.ToErrMsg = err.Error()
-			skipRecipient = true
-		} else {
-			readyChecklist.to = true
-		}
-	}
-	if !skipRecipient {
-		recipient, err := bpc.LookupRecipient(s.mctx(ctx).WithUIs(uis), stellarcommon.RecipientInput(arg.To))
-		if err != nil {
-			log("error with recipient field %v: %v", arg.To, err)
-			res.ToErrMsg = "recipient not found"
-			skipRecipient = true
-		} else {
-			readyChecklist.to = true
-			addMinBanner := func(them, amount string) {
-				res.Banners = append(res.Banners, stellar1.SendBannerLocal{
-					Level:   "info",
-					Message: fmt.Sprintf("Because it's %s first transaction, you must send at least %s XLM.", them, amount),
-				})
-			}
-			bannerThem := "their"
-			if recipient.User != nil {
-				bannerThem = fmt.Sprintf("%s's", recipient.User.GetNormalizedName())
-			}
-			if recipient.AccountID == nil {
-				// Sending a payment to a target with no account. (relay)
-				minAmountXLM = "2.01"
-				addMinBanner(bannerThem, minAmountXLM)
-			} else {
-				isFunded, err := bpc.IsAccountFunded(s.mctx(ctx), stellar1.AccountID(recipient.AccountID.String()))
-				if err != nil {
-					log("error checking recipient funding status %v: %v", *recipient.AccountID, err)
-				} else if !isFunded {
-					// Sending to a non-funded stellar account.
-					minAmountXLM = "1"
-					addMinBanner(bannerThem, minAmountXLM)
-				}
-			}
-		}
-	}
-
-	// -------------------- amount + asset --------------------
-
-	tracer.Stage("amount + asset")
-	bpaArg := buildPaymentAmountArg{
-		Amount:   arg.Amount,
-		Currency: arg.Currency,
-		Asset:    arg.Asset,
-	}
-	if fromInfo.available {
-		bpaArg.From = &fromInfo.from
-	}
-	amountX := s.buildPaymentAmountHelper(ctx, bpc, bpaArg)
-	res.AmountErrMsg = amountX.amountErrMsg
-	res.WorthDescription = amountX.worthDescription
-	res.WorthInfo = amountX.worthInfo
-
-	if amountX.haveAmount {
-		if !amountX.asset.IsNativeXLM() {
-			return res, fmt.Errorf("sending non-XLM assets is not supported")
-		}
-		readyChecklist.amount = true
-
-		if fromInfo.available {
-			// Check that the sender has enough asset available.
-			// Note: When adding support for sending non-XLM assets, check the asset instead of XLM here.
-			availableToSendXLM, err := bpc.AvailableXLMToSend(s.mctx(ctx), fromInfo.from)
-			if err != nil {
-				log("error getting available balance: %v", err)
-			} else {
-				cmp, err := stellarnet.CompareStellarAmounts(availableToSendXLM, amountX.amountOfAsset)
-				switch {
-				case err != nil:
-					log("error comparing amounts", err)
-				case cmp == -1:
-					// Send amount is more than the available to send.
-					readyChecklist.amount = false // block sending
-					res.AmountErrMsg = fmt.Sprintf("Your available to send is *%s XLM*", availableToSendXLM)
-					if arg.Currency != nil && amountX.rate != nil {
-						// If the user entered an amount in outside currency and an exchange
-						// rate is available, attempt to show them available balance in that currency.
-						availableToSendOutside, err := stellarnet.ConvertXLMToOutside(availableToSendXLM, amountX.rate.Rate)
-						if err != nil {
-							log("error converting available-to-send", err)
-						} else {
-							formattedATS, err := stellar.FormatCurrency(ctx, s.G(), availableToSendOutside, amountX.rate.Currency)
-							if err != nil {
-								log("error formatting available-to-send", err)
-							} else {
-								res.AmountErrMsg = fmt.Sprintf("Your available to send is *%s*", formattedATS)
-							}
-						}
-					}
-				default:
-					// Welcome back. How was your stay at the error handling hotel?
-				}
-			}
-		}
-
-		// Note: When adding support for sending non-XLM assets, check here that the recipient accepts the asset.
-	}
-
-	// -------------------- note + memo --------------------
-
-	tracer.Stage("note + memo")
-	if len(arg.SecretNote) <= 500 {
-		readyChecklist.secretNote = true
-	} else {
-		res.SecretNoteErrMsg = "Note is too long."
-	}
-
-	if len(arg.PublicMemo) <= 28 {
-		readyChecklist.publicMemo = true
-	} else {
-		res.PublicMemoErrMsg = "Memo is too long."
-	}
-
-	// -------------------- end --------------------
-
-	if readyChecklist.from && readyChecklist.to && readyChecklist.amount && readyChecklist.secretNote && readyChecklist.publicMemo {
-		res.ReadyToSend = true
-	}
-	return res, nil
+	return stellar.BuildPaymentLocal(mctx, arg)
 }
 
-type buildPaymentAmountArg struct {
-	// See buildPaymentLocal in avdl from which these args are copied.
-	Amount   string
-	Currency *stellar1.OutsideCurrencyCode
-	Asset    *stellar1.Asset
-	From     *stellar1.AccountID
-}
-
-type buildPaymentAmountResult struct {
-	haveAmount       bool // whether `amountOfAsset` and `asset` are valid
-	amountOfAsset    string
-	asset            stellar1.Asset
-	amountErrMsg     string
-	worthDescription string
-	worthInfo        string
-	// Rate may be nil if there was an error fetching it.
-	rate *stellar1.OutsideExchangeRate
-}
-
-func (s *Server) buildPaymentAmountHelper(ctx context.Context, bpc stellar.BuildPaymentCache, arg buildPaymentAmountArg) (res buildPaymentAmountResult) {
-	log := func(format string, args ...interface{}) {
-		s.G().Log.CDebugf(ctx, "bpl: "+format, args...)
-	}
-	res.asset = stellar1.AssetNative()
-	switch {
-	case arg.Currency != nil && arg.Asset == nil:
-		// Amount is of outside currency.
-		convertAmountOutside := "0"
-		if arg.Amount == "" {
-			// No amount given. Still convert for 0.
-		} else {
-			amount, err := stellarnet.ParseDecimalStrict(arg.Amount)
-			if err != nil || amount.Sign() < 0 {
-				// Invalid or negative amount.
-				res.amountErrMsg = "Invalid amount."
-				return res
-			}
-			if amount.Sign() > 0 {
-				// Only save the amount if it's non-zero. So that =="0" later works.
-				convertAmountOutside = arg.Amount
-			}
-		}
-		xrate, err := bpc.GetOutsideExchangeRate(s.mctx(ctx), *arg.Currency)
-		if err != nil {
-			log("error getting exchange rate for %v: %v", arg.Currency, err)
-			res.amountErrMsg = fmt.Sprintf("Could not get exchange rate for %v", arg.Currency.String())
-			return res
-		}
-		res.rate = &xrate
-		xlmAmount, err := stellarnet.ConvertOutsideToXLM(convertAmountOutside, xrate.Rate)
-		if err != nil {
-			log("error converting: %v", err)
-			res.amountErrMsg = fmt.Sprintf("Could not convert to XLM")
-			return res
-		}
-		res.amountOfAsset = xlmAmount
-		xlmAmountFormatted, err := stellar.FormatAmountXLM(xlmAmount)
-		if err != nil {
-			log("error formatting converted XLM amount: %v", err)
-			res.amountErrMsg = fmt.Sprintf("Could not convert to XLM")
-			return res
-		}
-		res.worthDescription = fmt.Sprintf("This is *%s*", xlmAmountFormatted)
-		if convertAmountOutside != "0" {
-			// haveAmount gates whether the send button is enabled.
-			// Only enable after `worthDescription` is set.
-			// Don't allow the user to send if they haven't seen `worthDescription`,
-			// since that's what they are really sending.
-			res.haveAmount = true
-		}
-		res.worthInfo, err = s.buildPaymentWorthInfo(ctx, xrate)
-		if err != nil {
-			log("error making worth info: %v", err)
-			res.worthInfo = ""
-		}
-		return res
-	case arg.Currency == nil:
-		// Amount is of asset.
-		useAmount := "0"
-		if arg.Amount != "" {
-			amountInt64, err := stellaramount.ParseInt64(arg.Amount)
-			if err != nil || amountInt64 <= 0 {
-				res.amountErrMsg = "Invalid amount."
-				return res
-			}
-			res.amountOfAsset = arg.Amount
-			res.haveAmount = true
-			useAmount = arg.Amount
-		}
-		// Attempt to show the converted amount in outside currency.
-		// Unlike when sending based on outside currency, conversion is not critical.
-		if arg.From == nil {
-			log("missing from address so can't convert XLM amount")
-			return res
-		}
-		currency, err := bpc.GetOutsideCurrencyPreference(s.mctx(ctx), *arg.From)
-		if err != nil {
-			log("error getting preferred currency for %v: %v", *arg.From, err)
-			return res
-		}
-		xrate, err := bpc.GetOutsideExchangeRate(s.mctx(ctx), currency)
-		if err != nil {
-			log("error getting exchange rate for %v: %v", currency, err)
-			return res
-		}
-		res.rate = &xrate
-		outsideAmount, err := stellarnet.ConvertXLMToOutside(useAmount, xrate.Rate)
-		if err != nil {
-			log("error converting: %v", err)
-			return res
-		}
-		outsideAmountFormatted, err := stellar.FormatCurrency(ctx, s.G(), outsideAmount, xrate.Currency)
-		if err != nil {
-			log("error formatting converted outside amount: %v", err)
-			return res
-		}
-		res.worthDescription = fmt.Sprintf("This is *%s*", outsideAmountFormatted)
-		res.worthInfo, err = s.buildPaymentWorthInfo(ctx, xrate)
-		if err != nil {
-			log("error making worth info: %v", err)
-			res.worthInfo = ""
-		}
-		return res
-	default:
-		// This is an API contract problem.
-		s.G().Log.CWarningf(ctx, "Only one of Asset and Currency parameters should be filled")
-		res.amountErrMsg = "Error in communication"
-		return res
-	}
-}
-
-func (s *Server) buildPaymentWorthInfo(ctx context.Context, rate stellar1.OutsideExchangeRate) (worthInfo string, err error) {
-	oneOutsideFormatted, err := stellar.FormatCurrency(ctx, s.G(), "1", rate.Currency)
+func (s *Server) ReviewPaymentLocal(ctx context.Context, arg stellar1.ReviewPaymentLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "ReviewPaymentLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
 	if err != nil {
-		return "", err
+		return err
 	}
-	amountXLM, err := stellarnet.ConvertOutsideToXLM("1", rate.Rate)
-	if err != nil {
-		return "", err
-	}
-	amountXLMFormatted, err := stellar.FormatAmountXLM(amountXLM)
-	if err != nil {
-		return "", err
-	}
-	worthInfo = fmt.Sprintf("%s = %s\nSource: coinmarketcap.com", oneOutsideFormatted, amountXLMFormatted)
-	return worthInfo, nil
+	return stellar.ReviewPaymentLocal(mctx, s.uiSource.StellarUI(), arg)
 }
 
 func (s *Server) SendPaymentLocal(ctx context.Context, arg stellar1.SendPaymentLocalArg) (res stellar1.SendPaymentResLocal, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "SendPaymentLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -1023,96 +744,45 @@ func (s *Server) SendPaymentLocal(ctx context.Context, arg stellar1.SendPaymentL
 	if err != nil {
 		return res, err
 	}
+	return stellar.SendPaymentLocal(mctx, arg)
+}
 
-	if len(arg.From) == 0 {
-		return res, fmt.Errorf("missing from account ID parameter")
+func (s *Server) SendPathLocal(ctx context.Context, arg stellar1.SendPathLocalArg) (res stellar1.SendPaymentResLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "SendPathLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
 	}
 
-	var fromSeqno *uint64
-	if arg.FromSeqno != "" {
-		fsq, err := strconv.ParseUint(arg.FromSeqno, 10, 64)
-		if err != nil {
-			return res, fmt.Errorf("invalid from seqno (%v): %v", arg.FromSeqno, err)
-		}
-		fromSeqno = &fsq
+	var pubMemo *stellarnet.Memo
+	if arg.PublicNote != "" {
+		pubMemo = stellarnet.NewMemoText(arg.PublicNote)
 	}
 
-	to := arg.To
-	if arg.ToIsAccountID {
-		toAccountID, err := libkb.ParseStellarAccountID(arg.To)
-		if err != nil {
-			return res, fmt.Errorf("recipient: %v", err)
-		}
-		to = toAccountID.String()
-	}
-
-	if !arg.Asset.IsNativeXLM() {
-		return res, fmt.Errorf("sending non-XLM assets is not supported")
-	}
-
-	var displayBalance stellar.DisplayBalance
-	if arg.WorthAmount != "" {
-		if arg.WorthCurrency == nil {
-			return res, fmt.Errorf("missing worth currency")
-		}
-		displayBalance = stellar.DisplayBalance{
-			Amount:   arg.WorthAmount,
-			Currency: arg.WorthCurrency.String(),
-		}
-	}
-
-	uis := libkb.UIs{
-		IdentifyUI: s.uiSource.IdentifyUI(s.G(), arg.SessionID),
-	}
-	mctx := libkb.NewMetaContext(ctx, s.G()).WithUIs(uis)
-	sendRes, err := stellar.SendPayment(mctx, s.remoter, stellar.SendPaymentArg{
-		From:           arg.From,
-		FromSeqno:      fromSeqno,
-		To:             stellarcommon.RecipientInput(to),
-		Amount:         arg.Amount,
-		DisplayBalance: displayBalance,
-		SecretNote:     arg.SecretNote,
-		PublicMemo:     arg.PublicMemo,
-		ForceRelay:     false,
-		QuickReturn:    arg.QuickReturn,
+	sendRes, err := stellar.SendPathPaymentGUI(mctx, s.walletState, stellar.SendPathPaymentArg{
+		From:        arg.Source,
+		To:          stellarcommon.RecipientInput(arg.Recipient),
+		Path:        arg.Path,
+		SecretNote:  arg.Note,
+		PublicMemo:  pubMemo,
+		QuickReturn: true,
 	})
 	if err != nil {
 		return res, err
 	}
 	return stellar1.SendPaymentResLocal{
-		KbTxID:  sendRes.KbTxID,
-		Pending: sendRes.Pending,
+		KbTxID:     sendRes.KbTxID,
+		Pending:    sendRes.Pending,
+		JumpToChat: sendRes.JumpToChat,
 	}, nil
-
-}
-
-func newPaymentLocal(txID stellar1.TransactionID, ctime stellar1.TimeMs, amount string, from, to, requester stellar1.AccountID) (*stellar1.PaymentLocal, error) {
-	loc := stellar1.NewPaymentLocal(txID, ctime)
-
-	isSender := from == requester
-	isRecipient := to == requester
-	switch {
-	case isSender && isRecipient:
-		// sent to self
-		loc.Delta = stellar1.BalanceDelta_NONE
-	case isSender:
-		loc.Delta = stellar1.BalanceDelta_DECREASE
-	case isRecipient:
-		loc.Delta = stellar1.BalanceDelta_INCREASE
-	}
-
-	formatted, err := stellar.FormatPaymentAmountXLM(amount, loc.Delta)
-	if err != nil {
-		return nil, err
-	}
-
-	loc.AmountDescription = formatted
-
-	return loc, nil
 }
 
 func (s *Server) CreateWalletAccountLocal(ctx context.Context, arg stellar1.CreateWalletAccountLocalArg) (res stellar1.AccountID, err error) {
-	ctx, err, fin := s.Preamble(ctx, preambleArg{
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
 		RPCName:       "CreateWalletAccountLocal",
 		Err:           &err,
 		RequireWallet: true,
@@ -1121,5 +791,558 @@ func (s *Server) CreateWalletAccountLocal(ctx context.Context, arg stellar1.Crea
 	if err != nil {
 		return res, err
 	}
-	return stellar.CreateNewAccount(s.mctx(ctx), arg.Name)
+	return stellar.CreateNewAccount(mctx, arg.Name)
+}
+
+func (s *Server) BuildRequestLocal(ctx context.Context, arg stellar1.BuildRequestLocalArg) (res stellar1.BuildRequestResLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "BuildRequestLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+	return stellar.BuildRequestLocal(mctx, arg)
+}
+
+func (s *Server) GetRequestDetailsLocal(ctx context.Context, arg stellar1.GetRequestDetailsLocalArg) (res stellar1.RequestDetailsLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "GetRequestDetailsLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return stellar1.RequestDetailsLocal{}, err
+	}
+
+	details, err := s.remoter.RequestDetails(mctx.Ctx(), arg.ReqID)
+	if err != nil {
+		return stellar1.RequestDetailsLocal{}, err
+	}
+
+	local, err := stellar.TransformRequestDetails(mctx, details)
+	if err != nil {
+		return stellar1.RequestDetailsLocal{}, err
+	}
+
+	return *local, nil
+}
+
+func (s *Server) MakeRequestLocal(ctx context.Context, arg stellar1.MakeRequestLocalArg) (res stellar1.KeybaseRequestID, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "MakeRequestLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return "", err
+	}
+
+	return stellar.MakeRequestGUI(mctx, s.remoter, stellar.MakeRequestArg{
+		To:       stellarcommon.RecipientInput(arg.Recipient),
+		Amount:   arg.Amount,
+		Asset:    arg.Asset,
+		Currency: arg.Currency,
+		Note:     arg.Note,
+	})
+}
+
+func (s *Server) CancelRequestLocal(ctx context.Context, arg stellar1.CancelRequestLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "CancelRequestLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+
+	return s.remoter.CancelRequest(mctx.Ctx(), arg.ReqID)
+}
+
+func (s *Server) MarkAsReadLocal(ctx context.Context, arg stellar1.MarkAsReadLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "MarkAsReadLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+
+	if arg.AccountID.IsNil() {
+		mctx.Debug("IsAccountMobileOnlyLocal called with an empty account id")
+		return ErrAccountIDMissing
+	}
+
+	err = s.remoter.MarkAsRead(mctx.Ctx(), arg.AccountID, stellar1.TransactionIDFromPaymentID(arg.MostRecentID))
+	if err != nil {
+		return err
+	}
+
+	go stellar.RefreshUnreadCount(s.G(), arg.AccountID)
+
+	return nil
+}
+
+func (s *Server) IsAccountMobileOnlyLocal(ctx context.Context, arg stellar1.IsAccountMobileOnlyLocalArg) (mobileOnly bool, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "IsAccountMobileOnlyLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return false, err
+	}
+
+	if arg.AccountID.IsNil() {
+		mctx.Debug("IsAccountMobileOnlyLocal called with an empty account id")
+		return false, ErrAccountIDMissing
+	}
+
+	return s.remoter.IsAccountMobileOnly(mctx.Ctx(), arg.AccountID)
+}
+
+func (s *Server) SetAccountMobileOnlyLocal(ctx context.Context, arg stellar1.SetAccountMobileOnlyLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "SetAccountMobileOnlyLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+
+	if arg.AccountID.IsNil() {
+		mctx.Debug("SetAccountMobileOnlyLocal called with an empty account id")
+		return ErrAccountIDMissing
+	}
+
+	if err = s.remoter.SetAccountMobileOnly(mctx.Ctx(), arg.AccountID); err != nil {
+		return err
+	}
+
+	if err = s.walletState.UpdateAccountEntries(mctx, "set account mobile only"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) SetAccountAllDevicesLocal(ctx context.Context, arg stellar1.SetAccountAllDevicesLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "SetAccountAllDevicesLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+
+	if arg.AccountID.IsNil() {
+		mctx.Debug("SetAccountAllDevicesLocal called with an empty account id")
+		return ErrAccountIDMissing
+	}
+
+	if err = s.remoter.MakeAccountAllDevices(mctx.Ctx(), arg.AccountID); err != nil {
+		return err
+	}
+
+	if err = s.walletState.UpdateAccountEntries(mctx, "set account all devices"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Server) GetPredefinedInflationDestinationsLocal(ctx context.Context, sessionID int) (ret []stellar1.PredefinedInflationDestination, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "GetPredefinedInflationDestinations",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return ret, err
+	}
+	return stellar.GetPredefinedInflationDestinations(mctx)
+}
+
+func (s *Server) SetInflationDestinationLocal(ctx context.Context, arg stellar1.SetInflationDestinationLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "SetInflationDestinationLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	return stellar.SetInflationDestinationLocal(mctx, arg)
+}
+
+func (s *Server) GetInflationDestinationLocal(ctx context.Context, arg stellar1.GetInflationDestinationLocalArg) (res stellar1.InflationDestinationResultLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "GetInflationDestinationLocal",
+		Err:           &err,
+		RequireWallet: false,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+
+	if arg.AccountID.IsNil() {
+		mctx.Debug("GetInflationDestinationLocal called with an empty account id")
+		return res, ErrAccountIDMissing
+	}
+
+	return stellar.GetInflationDestination(mctx, arg.AccountID)
+}
+
+func (s *Server) AirdropDetailsLocal(ctx context.Context, sessionID int) (resp stellar1.AirdropDetails, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AirdropDetailsLocal",
+		Err:           &err,
+		RequireWallet: false,
+	})
+	defer fin()
+	if err != nil {
+		return stellar1.AirdropDetails{}, err
+	}
+
+	isPromoted, details, disclaimer, err := remote.AirdropDetails(mctx)
+	if err != nil {
+		return stellar1.AirdropDetails{}, err
+	}
+	return stellar1.AirdropDetails{IsPromoted: isPromoted, Details: details, Disclaimer: disclaimer}, nil
+
+}
+
+func (s *Server) AirdropRegisterLocal(ctx context.Context, arg stellar1.AirdropRegisterLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AirdropRegisterLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	go testExperimentalRegistration(mctx)
+	return remote.AirdropRegister(mctx, arg.Register)
+}
+
+func (s *Server) AirdropStatusLocal(ctx context.Context, sessionID int) (status stellar1.AirdropStatus, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AirdropStatusLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return stellar1.AirdropStatus{}, err
+	}
+
+	return stellar.AirdropStatus(mctx)
+}
+
+func (s *Server) AddTrustlineLocal(ctx context.Context, arg stellar1.AddTrustlineLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AddTrustline",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+
+	return stellar.AddTrustlineLocal(mctx, arg)
+}
+
+func (s *Server) DeleteTrustlineLocal(ctx context.Context, arg stellar1.DeleteTrustlineLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AddTrustline",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	return stellar.DeleteTrustlineLocal(mctx, arg)
+}
+
+func (s *Server) ChangeTrustlineLimitLocal(ctx context.Context, arg stellar1.ChangeTrustlineLimitLocalArg) (err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "ChangeTrustlineLimit",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return err
+	}
+	return stellar.ChangeTrustlineLimitLocal(mctx, arg)
+}
+
+func (s *Server) GetTrustlinesLocal(ctx context.Context, arg stellar1.GetTrustlinesLocalArg) (ret []stellar1.Balance, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "GetTrustlinesLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return ret, err
+	}
+	return s.getTrustlinesAccountID(mctx, arg.AccountID)
+}
+
+func (s *Server) GetTrustlinesForRecipientLocal(ctx context.Context, arg stellar1.GetTrustlinesForRecipientLocalArg) (ret stellar1.RecipientTrustlinesLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName: "GetTrustlinesByRecipientLocal",
+		Err:     &err,
+	})
+	defer fin()
+	if err != nil {
+		return ret, err
+	}
+
+	recipient, err := stellar.LookupRecipient(mctx, stellarcommon.RecipientInput(arg.Recipient), false)
+	if err != nil {
+		return ret, err
+	}
+	if recipient.AccountID == nil {
+		return ret, errors.New("recipient has no stellar accounts")
+	}
+
+	trustlines, err := s.getTrustlinesAccountID(mctx, stellar1.AccountID(*recipient.AccountID))
+	if err != nil {
+		return ret, err
+	}
+	for _, t := range trustlines {
+		if !t.IsAuthorized {
+			continue
+		}
+		ret.Trustlines = append(ret.Trustlines, t)
+	}
+
+	if recipient.User != nil {
+		ret.RecipientType = stellar1.ParticipantType_KEYBASE
+	} else {
+		ret.RecipientType = stellar1.ParticipantType_STELLAR
+	}
+
+	return ret, nil
+}
+
+func (s *Server) getTrustlinesAccountID(mctx libkb.MetaContext, accountID stellar1.AccountID) (ret []stellar1.Balance, err error) {
+	balances, err := s.remoter.Balances(mctx.Ctx(), accountID)
+	if err != nil {
+		return ret, err
+	}
+	if len(balances) == 0 {
+		// Account is not on the network - no balances means no trustlines.
+		return ret, nil
+	}
+	ret = make([]stellar1.Balance, 0, len(balances)-1)
+	for _, balance := range balances {
+		if !balance.Asset.IsNativeXLM() {
+			ret = append(ret, balance)
+		}
+	}
+	return ret, nil
+}
+
+func (s *Server) FindPaymentPathLocal(ctx context.Context, arg stellar1.FindPaymentPathLocalArg) (res stellar1.PaymentPathLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "FindPaymentPathLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+
+	path, err := stellar.FindPaymentPath(mctx, s.remoter, arg.From, arg.To, arg.SourceAsset, arg.DestinationAsset, arg.Amount)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+
+	res.FullPath = path
+
+	res.SourceDisplay, err = stellar.FormatAmount(mctx, path.SourceAmount, false, stellarnet.Round)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+	res.SourceMaxDisplay, err = stellar.FormatAmount(mctx, path.SourceAmountMax, false, stellarnet.Round)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+	res.DestinationDisplay, err = stellar.FormatAmount(mctx, path.DestinationAmount, false, stellarnet.Round)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+
+	destAmt, err := stellarnet.ParseAmount(path.DestinationAmount)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+	srcAmt, err := stellarnet.ParseAmount(path.SourceAmount)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+	srcAmt.Quo(srcAmt, destAmt)
+
+	exchangeRateLeft, err := stellar.FormatAmountDescriptionAsset(mctx, "1", path.DestinationAsset)
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+	exchangeRateRight, err := stellar.FormatAmountDescriptionAsset(mctx, srcAmt.FloatString(7), path.SourceAsset)
+
+	if err != nil {
+		return stellar1.PaymentPathLocal{}, err
+	}
+	res.ExchangeRate = fmt.Sprintf("%s = %s", exchangeRateLeft, exchangeRateRight)
+
+	if len(path.SourceInsufficientBalance) > 0 {
+		availableToSpend, err := stellar.FormatAmountDescriptionAssetEx2(mctx, path.SourceInsufficientBalance, path.SourceAsset)
+		if err != nil {
+			return stellar1.PaymentPathLocal{}, err
+		}
+		res.AmountError = fmt.Sprintf("You only have %s available to spend.", availableToSpend)
+	}
+
+	return res, nil
+}
+
+func (s *Server) FuzzyAssetSearchLocal(ctx context.Context, arg stellar1.FuzzyAssetSearchLocalArg) (res []stellar1.Asset, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "FuzzyAssetSearchLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+
+	remoteArg := stellar1.FuzzyAssetSearchArg{
+		SearchString: arg.SearchString,
+	}
+	return stellar.FuzzyAssetSearch(mctx, s.remoter, remoteArg)
+}
+
+func (s *Server) ListPopularAssetsLocal(ctx context.Context, sessionID int) (res stellar1.AssetListResult, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "ListPopularAssetsLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+
+	remoteArg := stellar1.ListPopularAssetsArg{}
+	return stellar.ListPopularAssets(mctx, s.remoter, remoteArg)
+}
+
+func (s *Server) GetStaticConfigLocal(ctx context.Context) (res stellar1.StaticConfig, err error) {
+	return stellar1.StaticConfig{
+		PaymentNoteMaxLength: libkb.MaxStellarPaymentNoteLength,
+		RequestNoteMaxLength: msgchecker.RequestPaymentTextMaxLength,
+		PublicMemoMaxLength:  libkb.MaxStellarPaymentPublicNoteLength,
+	}, nil
+}
+
+func (s *Server) AssetDepositLocal(ctx context.Context, arg stellar1.AssetDepositLocalArg) (res stellar1.AssetActionResultLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AssetDepositLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+
+	ai, err := s.prepareAnchorInteractor(mctx, arg.AccountID, arg.Asset)
+	if err != nil {
+		return res, err
+	}
+
+	return ai.Deposit(mctx)
+}
+
+func (s *Server) AssetWithdrawLocal(ctx context.Context, arg stellar1.AssetWithdrawLocalArg) (res stellar1.AssetActionResultLocal, err error) {
+	mctx, fin, err := s.Preamble(ctx, preambleArg{
+		RPCName:       "AssetWithdrawLocal",
+		Err:           &err,
+		RequireWallet: true,
+	})
+	defer fin()
+	if err != nil {
+		return res, err
+	}
+
+	ai, err := s.prepareAnchorInteractor(mctx, arg.AccountID, arg.Asset)
+	if err != nil {
+		return res, err
+	}
+
+	return ai.Withdraw(mctx)
+}
+
+func (s *Server) prepareAnchorInteractor(mctx libkb.MetaContext, accountID stellar1.AccountID, asset stellar1.Asset) (*anchorInteractor, error) {
+	// check that the user owns accountID
+	own, _, err := stellar.OwnAccountCached(mctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if !own {
+		return nil, errors.New("caller doesn't own account")
+	}
+
+	// check that accountID has a trustline to the asset
+	trustlines, err := s.getTrustlinesAccountID(mctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	var fullAsset stellar1.Asset
+	for _, tl := range trustlines {
+		if tl.Asset.Code == asset.Code && tl.Asset.Issuer == asset.Issuer {
+			fullAsset = tl.Asset
+			break
+		}
+	}
+	if fullAsset.Code == "" || fullAsset.Issuer == "" {
+		return nil, errors.New("caller doesn't have trustline to asset")
+	}
+
+	var seed *stellar1.SecretKey
+	if fullAsset.AuthEndpoint != "" {
+		// get the secret key for account id
+		_, bundle, err := stellar.LookupSender(mctx, accountID)
+		if err != nil {
+			return nil, err
+		}
+		seed = &bundle.Signers[0]
+	}
+
+	// all good from the user's perspective, proceed...
+	return newAnchorInteractor(accountID, seed, fullAsset), nil
+}
+
+func testExperimentalRegistration(mctx libkb.MetaContext) {
+	err := airdrop.NewClient().Register(mctx.BackgroundWithLogTags())
+	if err != nil {
+		mctx.Info("Error testExperimentalRegistration: %s", err.Error())
+	}
 }

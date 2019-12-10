@@ -15,7 +15,6 @@ import (
 
 func getBuildSpecificCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
 	return []cli.Command{
-		NewCmdAPICall(cl, g),
 		NewCmdCheckTracking(cl, g),
 		NewCmdFakeTrackingChanged(cl, g),
 		NewCmdFavorite(cl, g),
@@ -30,8 +29,9 @@ func getBuildSpecificCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext
 		newCmdTeamGenerateSeitan(cl, g),
 		newCmdTeamRotateKey(cl, g),
 		newCmdTeamDebug(cl, g),
-		newCmdScript(cl, g),
-		newCmdUploadAvatar(cl, g),
+		NewCmdContacts(cl, g),
+		NewCmdPeopleSearch(cl, g),
+		newCmdTestAirdropReg(cl, g),
 	}
 }
 
@@ -40,18 +40,34 @@ func getBuildSpecificChatCommands(cl *libcmdline.CommandLine, g *libkb.GlobalCon
 		newCmdChatDeleteHistoryDev(cl, g),
 		newCmdChatSetRetentionDev(cl, g),
 		newCmdChatKBFSUpgrade(cl, g),
+		newCmdChatProfileSearchDev(cl, g),
+		newCmdChatAddBotMember(cl, g),
+		newCmdChatRemoveBotMember(cl, g),
+		newCmdChatEditBotMember(cl, g),
+		newCmdChatBotMemberSettings(cl, g),
+	}
+}
+
+func getBuildSpecificTeamCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
+	return []cli.Command{
+		// TODO HOTPOT-599 move to production
+		newCmdTeamBotSettings(cl, g),
 	}
 }
 
 func getBuildSpecificAccountCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
 	return []cli.Command{
 		NewCmdAccountReset(cl, g),
+		NewCmdAccountResetStart(cl, g),
+		NewCmdAccountResetCancel(cl, g),
+		NewCmdAccountResetTimeTravel(cl, g),
 	}
 }
 
 func getBuildSpecificWalletCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
 	return []cli.Command{
 		newCmdWalletDump(cl, g),
+		newCmdWalletHandleURI(cl, g),
 		newCmdWalletInit(cl, g),
 	}
 }
@@ -59,6 +75,13 @@ func getBuildSpecificWalletCommands(cl *libcmdline.CommandLine, g *libkb.GlobalC
 func getBuildSpecificLogCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
 	return []cli.Command{
 		NewCmdLogProfile(cl, g),
+	}
+}
+
+func getBuildSpecificFSCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
+	return []cli.Command{
+		NewCmdSimpleFSUpgrade(cl, g),
+		NewCmdSimpleFSForceConflict(cl, g),
 	}
 }
 
@@ -78,6 +101,10 @@ var restrictedSignupFlags = []cli.Flag{
 	cli.BoolFlag{
 		Name:  "pgp",
 		Usage: "Add a server-synced pgp key",
+	},
+	cli.BoolFlag{
+		Name:  "no-passphrase",
+		Usage: "Sign up without passphrase.",
 	},
 }
 

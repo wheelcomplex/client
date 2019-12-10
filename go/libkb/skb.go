@@ -20,6 +20,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/keybase/client/go/kbcrypto"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 	triplesec "github.com/keybase/go-triplesec"
 )
@@ -34,14 +35,14 @@ func DebugDumpKey(g *GlobalContext, name string, b []byte) {
 	}
 	g.Log.Notice("DUMPKEY %s -> %s", name, tmp.Name())
 	buf := bytes.NewBuffer(b)
-	io.Copy(tmp, buf)
+	_, _ = io.Copy(tmp, buf)
 	tmp.Close()
 }
 
 type SKB struct {
-	Priv SKBPriv  `codec:"priv"`
-	Pub  []byte   `codec:"pub"`
-	Type AlgoType `codec:"type,omitempty"`
+	Priv SKBPriv           `codec:"priv"`
+	Pub  []byte            `codec:"pub"`
+	Type kbcrypto.AlgoType `codec:"type,omitempty"`
 
 	decodedPub      GenericKey
 	decryptedSecret GenericKey
@@ -92,7 +93,7 @@ func (key *PGPKeyBundle) ToServerSKB(gc *GlobalContext, tsec Triplesec, gen Pass
 	}
 	if tsec != nil {
 		ret.Priv.Data, err = tsec.Encrypt(sk.Bytes())
-		ret.Priv.Encryption = int(triplesec.Version) // Version 3 is the current TripleSec version
+		ret.Priv.Encryption = int(ClientTriplesecVersion)
 		if err != nil {
 			return
 		}
@@ -115,7 +116,6 @@ func (key *PGPKeyBundle) ToServerSKB(gc *GlobalContext, tsec Triplesec, gen Pass
 
 func (s *SKB) Dump() {
 	if s == nil {
-		s.G().Log.Debug("SKB Dump: skb is nil\n")
 		return
 	}
 	s.G().Log.Debug("skb: %+v, uid = %s\n", s, s.uid)
@@ -131,8 +131,8 @@ func (s *SKB) newLKSec(pps *PassphraseStream) *LKSec {
 	return NewLKSec(pps, s.uid)
 }
 
-func (s *SKB) ToPacket() (ret *KeybasePacket, err error) {
-	return NewKeybasePacket(s, TagP3skb, KeybasePacketV1)
+func (s *SKB) GetTagAndVersion() (kbcrypto.PacketTag, kbcrypto.PacketVersion) {
+	return kbcrypto.TagP3skb, kbcrypto.KeybasePacketV1
 }
 
 func (s *SKB) ReadKey() (g GenericKey, err error) {
@@ -141,9 +141,9 @@ func (s *SKB) ReadKey() (g GenericKey, err error) {
 		var w *Warnings
 		g, w, err = ReadOneKeyFromBytes(s.Pub)
 		w.Warn(s.G())
-	case s.Type == KIDNaclEddsa:
+	case s.Type == kbcrypto.KIDNaclEddsa:
 		g, err = ImportNaclSigningKeyPairFromBytes(s.Pub, nil)
-	case s.Type == KIDNaclDH:
+	case s.Type == kbcrypto.KIDNaclDH:
 		g, err = ImportNaclDHKeyPairFromBytes(s.Pub, nil)
 	default:
 		err = UnknownKeyTypeError{s.Type}
@@ -183,7 +183,7 @@ func (s *SKB) HumanDescription(owner *User) (string, error) {
 func (s *SKB) pgpHumanDescription(key GenericKey) (string, error) {
 	pgpKey, ok := key.(*PGPKeyBundle)
 	if !ok {
-		return "", BadKeyError{Msg: "not pgp key despite skb algo type"}
+		return "", kbcrypto.BadKeyError{Msg: "not pgp key despite skb algo type"}
 	}
 
 	return pgpKey.HumanDescription(), nil
@@ -220,7 +220,7 @@ func (s *SKB) unlockSecretKeyFromSecretRetriever(m MetaContext, secretRetriever 
 	case LKSecVersion:
 		unlocked, err = s.lksUnlockWithSecretRetriever(m, secretRetriever)
 	default:
-		err = BadKeyError{fmt.Sprintf("Can't unlock secret from secret retriever with protection type %d", int(s.Priv.Encryption))}
+		err = kbcrypto.BadKeyError{Msg: fmt.Sprintf("Can't unlock secret from secret retriever with protection type %d", s.Priv.Encryption)}
 	}
 
 	if err == nil {
@@ -230,18 +230,18 @@ func (s *SKB) unlockSecretKeyFromSecretRetriever(m MetaContext, secretRetriever 
 }
 
 func (s *SKB) UnlockSecretKey(m MetaContext, passphrase string, tsec Triplesec, pps *PassphraseStream, secretStorer SecretStorer) (key GenericKey, err error) {
-	defer m.CTrace("SKB#UnlockSecretKey", func() error { return err })()
+	defer m.Trace("SKB#UnlockSecretKey", func() error { return err })()
 	if key = s.decryptedSecret; key != nil {
 		return key, nil
 	}
 	var unlocked []byte
 
-	switch s.Priv.Encryption {
-	case 0:
-		m.CDebugf("case: Unlocked")
+	switch {
+	case s.Priv.Encryption == 0:
+		m.Debug("case: Unlocked")
 		unlocked = s.Priv.Data
-	case int(triplesec.Version):
-		m.CDebugf("case: Triplesec")
+	case s.Priv.Encryption > 0 && s.Priv.Encryption < LKSecVersion:
+		m.Debug("case: Triplesec")
 		tsecIn := tsec
 		if tsec == nil {
 			tsec, err = s.G().NewTriplesec([]byte(passphrase), nil)
@@ -254,11 +254,11 @@ func (s *SKB) UnlockSecretKey(m MetaContext, passphrase string, tsec Triplesec, 
 			return nil, err
 		}
 		if tsecIn == nil {
-			m.CDebugf("Caching passphrase stream: tsec=%v, pps=%v", (tsec != nil), (pps != nil))
+			m.Debug("Caching passphrase stream: tsec=%v, pps=%v", (tsec != nil), (pps != nil))
 			m.ActiveDevice().CachePassphraseStream(NewPassphraseStreamCache(tsec, pps))
 		}
-	case LKSecVersion:
-		m.CDebugf("case: LKSec")
+	case s.Priv.Encryption == LKSecVersion:
+		m.Debug("case: LKSec")
 		ppsIn := pps
 		if pps == nil {
 			tsec, pps, err = UnverifiedPassphraseStream(m, s.uid, passphrase)
@@ -271,11 +271,11 @@ func (s *SKB) UnlockSecretKey(m MetaContext, passphrase string, tsec Triplesec, 
 			return nil, err
 		}
 		if ppsIn == nil {
-			m.CDebugf("Caching passphrase stream: tsec=%v, pps=%v", (tsec != nil), (pps != nil))
+			m.Debug("Caching passphrase stream: tsec=%v, pps=%v", (tsec != nil), (pps != nil))
 			m.ActiveDevice().CachePassphraseStream(NewPassphraseStreamCache(tsec, pps))
 		}
 	default:
-		err = BadKeyError{fmt.Sprintf("Can't unlock secret with protection type %d", int(s.Priv.Encryption))}
+		err = kbcrypto.BadKeyError{Msg: fmt.Sprintf("Can't unlock secret with protection type %d", s.Priv.Encryption)}
 		return nil, err
 	}
 	key, err = s.parseUnlocked(unlocked)
@@ -289,14 +289,14 @@ func (s *SKB) parseUnlocked(unlocked []byte) (key GenericKey, err error) {
 		var w *Warnings
 		key, w, err = ReadOneKeyFromBytes(unlocked)
 		w.Warn(s.G())
-	case s.Type == KIDNaclEddsa:
+	case s.Type == kbcrypto.KIDNaclEddsa:
 		key, err = ImportNaclSigningKeyPairFromBytes(s.Pub, unlocked)
-	case s.Type == KIDNaclDH:
+	case s.Type == kbcrypto.KIDNaclDH:
 		key, err = ImportNaclDHKeyPairFromBytes(s.Pub, unlocked)
 	}
 
 	if key == nil {
-		err = BadKeyError{"can't parse secret key after unlock"}
+		err = kbcrypto.BadKeyError{Msg: "can't parse secret key after unlock"}
 	}
 	if err != nil {
 		return
@@ -321,12 +321,12 @@ func (s *SKB) tsecUnlock(tsec Triplesec) ([]byte, error) {
 }
 
 func (s *SKB) lksUnlock(m MetaContext, pps *PassphraseStream, secretStorer SecretStorer) (unlocked []byte, err error) {
-	defer m.CTrace("SKB#lksUnlock", func() error { return err })()
-	m.CDebugf("| creating new lks")
+	defer m.Trace("SKB#lksUnlock", func() error { return err })()
+	m.Debug("| creating new lks")
 
 	lks := s.newLKSec(pps)
 	s.Lock()
-	m.CDebugf("| setting uid in lks to %s", s.uid)
+	m.Debug("| setting uid in lks to %s", s.uid)
 	lks.SetUID(s.uid)
 	s.Unlock()
 	var ppGen PassphraseGeneration
@@ -344,9 +344,9 @@ func (s *SKB) lksUnlock(m MetaContext, pps *PassphraseStream, secretStorer Secre
 			return
 		}
 		// Ignore any errors storing the secret.
-		storeSecretErr := secretStorer.StoreSecret(secret)
+		storeSecretErr := secretStorer.StoreSecret(m, secret)
 		if storeSecretErr != nil {
-			m.CWarningf("StoreSecret error: %s", storeSecretErr)
+			m.Warning("StoreSecret error: %s", storeSecretErr)
 		}
 	}
 
@@ -354,7 +354,7 @@ func (s *SKB) lksUnlock(m MetaContext, pps *PassphraseStream, secretStorer Secre
 }
 
 func (s *SKB) lksUnlockWithSecretRetriever(m MetaContext, secretRetriever SecretRetriever) (unlocked []byte, err error) {
-	secret, err := secretRetriever.RetrieveSecret()
+	secret, err := secretRetriever.RetrieveSecret(m)
 	if err != nil {
 		return
 	}
@@ -374,33 +374,12 @@ func (s *SKB) SetUID(uid keybase1.UID) {
 	s.Unlock()
 }
 
-func (p KeybasePacket) ToSKB() (*SKB, error) {
-	ret, ok := p.Body.(*SKB)
-	if !ok {
-		return nil, UnmarshalError{"SKB"}
-	}
-	return ret, nil
-}
-
 func (s *SKB) ArmoredEncode() (ret string, err error) {
-	return PacketArmoredEncode(s)
-}
-
-func (p KeybasePackets) ToListOfSKBs(g *GlobalContext) ([]*SKB, error) {
-	ret := make([]*SKB, len(p))
-	for i, e := range p {
-		k, ok := e.Body.(*SKB)
-		if !ok {
-			return nil, fmt.Errorf("Bad SKB sequence; got packet of wrong type %T", e.Body)
-		}
-		k.SetGlobalContext(g)
-		ret[i] = k
-	}
-	return ret, nil
+	return kbcrypto.EncodePacketToArmoredString(s)
 }
 
 func (s *SKB) UnlockWithStoredSecret(m MetaContext, secretRetriever SecretRetriever) (ret GenericKey, err error) {
-	defer m.CTrace("SKB#UnlockWithStoredSecret()", func() error { return err })()
+	defer m.Trace("SKB#UnlockWithStoredSecret()", func() error { return err })()
 	if ret = s.decryptedSecret; ret != nil {
 		return
 	}
@@ -410,7 +389,7 @@ func (s *SKB) UnlockWithStoredSecret(m MetaContext, secretRetriever SecretRetrie
 var ErrUnlockNotPossible = errors.New("unlock not possible")
 
 func (s *SKB) UnlockNoPrompt(m MetaContext, secretStore SecretStore) (ret GenericKey, err error) {
-	defer m.CTrace("SKB#UnlockNoPrompt", func() error { return err })()
+	defer m.Trace("SKB#UnlockNoPrompt", func() error { return err })()
 	// already have decrypted secret?
 	if s.decryptedSecret != nil {
 		return s.decryptedSecret, nil
@@ -419,7 +398,7 @@ func (s *SKB) UnlockNoPrompt(m MetaContext, secretStore SecretStore) (ret Generi
 	// try using the secret store:
 	if secretStore != nil {
 		key, err := s.unlockSecretKeyFromSecretRetriever(m, secretStore)
-		m.CDebugf("| unlockSecretKeyFromSecretRetriever -> %s", ErrToOk(err))
+		m.Debug("| unlockSecretKeyFromSecretRetriever -> %s", ErrToOk(err))
 		if err == nil {
 			return key, nil
 		}
@@ -431,7 +410,7 @@ func (s *SKB) UnlockNoPrompt(m MetaContext, secretStore SecretStore) (ret Generi
 	if tsec != nil || pps != nil {
 		key, err := s.UnlockSecretKey(m, "", tsec, pps, nil)
 		if err == nil {
-			m.CDebugf("| Unlocked key with cached 3Sec and passphrase stream")
+			m.Debug("| Unlocked key with cached 3Sec and passphrase stream")
 			return key, nil
 		}
 		if _, ok := err.(PassphraseError); !ok {
@@ -440,7 +419,7 @@ func (s *SKB) UnlockNoPrompt(m MetaContext, secretStore SecretStore) (ret Generi
 		}
 		// fall through if it's a passphrase error
 	} else {
-		m.CDebugf("| No 3Sec or PassphraseStream in UnlockNoPrompt")
+		m.Debug("| No 3Sec or PassphraseStream in UnlockNoPrompt")
 	}
 
 	// failed to unlock without prompting user for passphrase
@@ -448,12 +427,12 @@ func (s *SKB) UnlockNoPrompt(m MetaContext, secretStore SecretStore) (ret Generi
 }
 
 func (s *SKB) unlockPrompt(m MetaContext, arg SecretKeyPromptArg, secretStore SecretStore, me *User) (ret GenericKey, err error) {
-	defer m.CTrace("SKB#unlockPrompt", func() error { return err })()
+	defer m.Trace("SKB#unlockPrompt", func() error { return err })()
 
 	// check to see if user has recently canceled an unlock prompt:
 	// if lctx != nil, then don't bother as any prompts during login should be shown.
 	if m.LoginContext() == nil && arg.UseCancelCache && m.ActiveDevice().SecretPromptCancelTimer().WasRecentlyCanceled(m) {
-		m.CDebugf("prompt was recently canceled; skipping")
+		m.Debug("prompt was recently canceled; skipping")
 		return nil, SkipSecretPromptError{}
 	}
 
@@ -484,7 +463,7 @@ func (s *SKB) unlockPrompt(m MetaContext, arg SecretKeyPromptArg, secretStore Se
 }
 
 func (s *SKB) PromptAndUnlock(m MetaContext, arg SecretKeyPromptArg, secretStore SecretStore, me *User) (ret GenericKey, err error) {
-	defer m.CTrace(fmt.Sprintf("SKB#PromptAndUnlock(%s)", arg.Reason), func() error { return err })()
+	defer m.Trace(fmt.Sprintf("SKB#PromptAndUnlock(%s)", arg.Reason), func() error { return err })()
 
 	// First try to unlock without prompting the user.
 	ret, err = s.UnlockNoPrompt(m, secretStore)

@@ -34,7 +34,8 @@ func assertUntracked(tc libkb.TestContext, username string) {
 		tc.T.Fatal(err)
 	}
 
-	s, err := me.TrackChainLinkFor(them.GetNormalizedName(), them.GetUID())
+	m := NewMetaContextForTest(tc)
+	s, err := me.TrackChainLinkFor(m, them.GetNormalizedName(), them.GetUID())
 	if err != nil {
 		tc.T.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func assertUntracked(tc libkb.TestContext, username string) {
 		tc.T.Fatal("expected not to get a tracking statement; but got one")
 	}
 
-	s, err = libkb.LocalTrackChainLinkFor(me.GetUID(), them.GetUID(), tc.G)
+	s, err = libkb.LocalTrackChainLinkFor(m, me.GetUID(), them.GetUID())
 	if err != nil {
 		tc.T.Fatal(err)
 	}
@@ -56,7 +57,6 @@ func untrackAlice(tc libkb.TestContext, fu *FakeUser, sigVersion libkb.SigVersio
 	if err != nil {
 		tc.T.Fatal(err)
 	}
-	return
 }
 
 func untrackBob(tc libkb.TestContext, fu *FakeUser, sigVersion libkb.SigVersion) {
@@ -64,7 +64,6 @@ func untrackBob(tc libkb.TestContext, fu *FakeUser, sigVersion libkb.SigVersion)
 	if err != nil {
 		tc.T.Fatal(err)
 	}
-	return
 }
 
 func TestUntrack(t *testing.T) {
@@ -109,7 +108,6 @@ func _testUntrack(t *testing.T, sigVersion libkb.SigVersion) {
 	} else if _, ok := err.(libkb.UntrackError); !ok {
 		t.Fatalf("expected an UntrackError; got %s", err)
 	}
-	return
 }
 
 func TestUntrackRemoteOnly(t *testing.T) {

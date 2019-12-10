@@ -68,6 +68,28 @@
     },
     {
       "type": "record",
+      "name": "Identify2ResUPK2",
+      "fields": [
+        {
+          "type": "UserPlusKeysV2AllIncarnations",
+          "name": "upk"
+        },
+        {
+          "type": "Time",
+          "name": "identifiedAt"
+        },
+        {
+          "type": [
+            null,
+            "IdentifyTrackBreaks"
+          ],
+          "name": "trackBreaks"
+        }
+      ],
+      "lint": "ignore"
+    },
+    {
+      "type": "record",
       "name": "IdentifyLiteRes",
       "fields": [
         {
@@ -123,6 +145,10 @@
         {
           "name": "assertion",
           "type": "string"
+        },
+        {
+          "name": "oa",
+          "type": "OfflineAvailability"
         }
       ],
       "response": "UserOrTeamLite",
@@ -149,53 +175,47 @@
         },
         {
           "name": "useDelegateUI",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "alwaysBlock",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "noErrorOnTrackFailure",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "forceRemoteCheck",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "needProofSet",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "allowEmptySelfID",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "noSkipSelf",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         {
           "name": "canSuppressUI",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "identifyBehavior",
-          "type": "TLFIdentifyBehavior",
-          "default": 0
+          "type": "TLFIdentifyBehavior"
         },
         {
           "name": "forceDisplay",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
+        },
+        {
+          "name": "actLoggedOut",
+          "type": "boolean"
         }
       ],
       "response": "Identify2Res"
@@ -220,53 +240,47 @@
         },
         {
           "name": "useDelegateUI",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "alwaysBlock",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "noErrorOnTrackFailure",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "forceRemoteCheck",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "needProofSet",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "allowEmptySelfID",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "noSkipSelf",
-          "type": "boolean",
-          "default": true
+          "type": "boolean"
         },
         {
           "name": "canSuppressUI",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         },
         {
           "name": "identifyBehavior",
-          "type": "TLFIdentifyBehavior",
-          "default": 0
+          "type": "TLFIdentifyBehavior"
         },
         {
           "name": "forceDisplay",
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
+        },
+        {
+          "name": "oa",
+          "type": "OfflineAvailability"
         }
       ],
       "response": "IdentifyLiteRes"
@@ -304,6 +318,10 @@
         {
           "name": "identifyBehavior",
           "type": "TLFIdentifyBehavior"
+        },
+        {
+          "name": "oa",
+          "type": "OfflineAvailability"
         }
       ],
       "response": "ResolveIdentifyImplicitTeamRes"
@@ -321,6 +339,15 @@
       ],
       "response": "Folder",
       "doc": "resolveImplicitTeam returns a TLF display name given a teamID. The publicness\n   of the team is inferred from the TeamID."
+    },
+    "normalizeSocialAssertion": {
+      "request": [
+        {
+          "name": "assertion",
+          "type": "string"
+        }
+      ],
+      "response": "SocialAssertion"
     }
   },
   "namespace": "keybase.1"

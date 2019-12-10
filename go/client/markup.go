@@ -33,7 +33,6 @@ func (p *Paragraph) Buffer(b []byte) {
 
 var (
 	nl = []byte{'\n'}
-	sp = []byte{' '}
 )
 
 // makePad makes a whitespace pad that is l bytes long.
@@ -67,7 +66,7 @@ func spacify(s string) string {
 func (p Paragraph) Output(out io.Writer) {
 	s := []byte(spacify(string(p.data)))
 	if len(s) == 0 {
-		out.Write(nl)
+		_, _ = out.Write(nl)
 		return
 	}
 	indent := p.indent * INDENT
@@ -78,14 +77,14 @@ func (p Paragraph) Output(out io.Writer) {
 	pad := makePad(len(p.prefix))
 
 	for i, line := range lines {
-		out.Write(gutter)
+		_, _ = out.Write(gutter)
 		if i == 0 {
-			out.Write([]byte(p.prefix))
+			_, _ = out.Write([]byte(p.prefix))
 		} else {
-			out.Write(pad)
+			_, _ = out.Write(pad)
 		}
-		out.Write(line)
-		out.Write(nl)
+		_, _ = out.Write(line)
+		_, _ = out.Write(nl)
 	}
 }
 
@@ -98,7 +97,7 @@ type Renderer struct {
 }
 
 func NewRenderer(g *libkb.GlobalContext, out io.Writer) *Renderer {
-	width, _ := GlobUI.GetTerminalSize()
+	width, _ := g.UI.GetTerminalUI().TerminalSize()
 	if width == 0 {
 		width = 80
 	}
@@ -200,9 +199,9 @@ func (r *Renderer) RenderNode(node *html.Node) {
 	}
 }
 
-func getWriter(w io.Writer) io.Writer {
+func getWriter(g *libkb.GlobalContext, w io.Writer) io.Writer {
 	if w == nil {
-		w = GlobUI.OutputWriter()
+		w = g.UI.GetTerminalUI().OutputWriter()
 	}
 	return w
 }
@@ -211,10 +210,10 @@ func Render(g *libkb.GlobalContext, w io.Writer, m *libkb.Markup) {
 	if m == nil {
 		return
 	}
-	w = getWriter(w)
+	w = getWriter(g, w)
 	doc, err := Q.NewDocumentFromReader(m.ToReader())
 	if err != nil {
-		GlobUI.Printf("Cannot render markup: %s\n", err)
+		g.UI.GetTerminalUI().Printf("Cannot render markup: %s\n", err)
 		return
 	}
 	renderer := NewRenderer(g, w)
@@ -222,9 +221,9 @@ func Render(g *libkb.GlobalContext, w io.Writer, m *libkb.Markup) {
 }
 
 func RenderText(g *libkb.GlobalContext, w io.Writer, txt keybase1.Text) {
-	w = getWriter(w)
+	w = getWriter(g, w)
 	if !txt.Markup {
-		w.Write([]byte(txt.Data))
+		_, _ = w.Write([]byte(txt.Data))
 	} else {
 		Render(g, w, libkb.NewMarkup(txt.Data))
 	}

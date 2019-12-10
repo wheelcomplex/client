@@ -1,7 +1,6 @@
 package avatars
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/keybase/client/go/kbhttp"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/clockwork"
@@ -23,7 +23,7 @@ func TestAvatarsFullCaching(t *testing.T) {
 	clock := clockwork.NewFakeClock()
 	tc.G.SetClock(clock)
 
-	testSrv := libkb.NewHTTPSrv(tc.G, libkb.NewPortRangeListenerSource(7000, 8000))
+	testSrv := kbhttp.NewSrv(tc.G.GetLog(), kbhttp.NewRandomPortRangeListenerSource(7000, 8000))
 	require.NoError(t, testSrv.Start())
 	testSrv.HandleFunc("/p", func(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprintf(w, "hi")
@@ -31,20 +31,23 @@ func TestAvatarsFullCaching(t *testing.T) {
 	testSrv.HandleFunc("/p2", func(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprintf(w, "hi2")
 	})
+	testSrv.HandleFunc("/p3", func(w http.ResponseWriter, req *http.Request) {
+		fmt.Fprintf(w, "hi3")
+	})
 
-	ctx := context.TODO()
 	cb := make(chan struct{}, 5)
 	a, _ := testSrv.Addr()
 	testSrvAddr := fmt.Sprintf("http://%s/p", a)
 	tc.G.API = newAvatarMockAPI(makeHandler(testSrvAddr, cb))
-	source := NewFullCachingSource(tc.G, time.Hour, 10)
+	m := libkb.NewMetaContextForTest(tc)
+	source := NewFullCachingSource(time.Hour, 1)
 	source.populateSuccessCh = make(chan struct{}, 5)
 	source.tempDir = os.TempDir()
-	source.StartBackgroundTasks()
-	defer source.StopBackgroundTasks()
+	source.StartBackgroundTasks(m)
+	defer source.StopBackgroundTasks(m)
 
 	t.Logf("first blood")
-	res, err := source.LoadUsers(ctx, []string{"mike"}, []keybase1.AvatarFormat{"square"})
+	res, err := source.LoadUsers(m, []string{"mike"}, []keybase1.AvatarFormat{"square"})
 	require.NoError(t, err)
 	require.Equal(t, testSrvAddr, res.Picmap["mike"]["square"].String())
 	select {
@@ -78,7 +81,7 @@ func TestAvatarsFullCaching(t *testing.T) {
 		require.NoError(t, err)
 		return string(dat)
 	}
-	res, err = source.LoadUsers(ctx, []string{"mike"}, []keybase1.AvatarFormat{"square"})
+	res, err = source.LoadUsers(m, []string{"mike"}, []keybase1.AvatarFormat{"square"})
 	require.NoError(t, err)
 	select {
 	case <-cb:
@@ -90,16 +93,16 @@ func TestAvatarsFullCaching(t *testing.T) {
 		require.Fail(t, "no populate")
 	default:
 	}
-	val := res.Picmap["mike"]["square"].String()
-	require.NotEqual(t, testSrvAddr, val)
-	require.True(t, strings.HasPrefix(val, "file://"))
-	require.Equal(t, "hi", getFile(val))
+	mikePath := res.Picmap["mike"]["square"].String()
+	require.NotEqual(t, testSrvAddr, mikePath)
+	require.True(t, strings.HasPrefix(mikePath, "file://"))
+	require.Equal(t, "hi", getFile(mikePath))
 
 	t.Log("stale")
 	testSrvAddr = fmt.Sprintf("http://%s/p2", a)
 	tc.G.API = newAvatarMockAPI(makeHandler(testSrvAddr, cb))
 	clock.Advance(2 * time.Hour)
-	res, err = source.LoadUsers(ctx, []string{"mike"}, []keybase1.AvatarFormat{"square"})
+	res, err = source.LoadUsers(m, []string{"mike"}, []keybase1.AvatarFormat{"square"})
 	require.NoError(t, err)
 	select {
 	case <-cb:
@@ -111,9 +114,9 @@ func TestAvatarsFullCaching(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		require.Fail(t, "no populate")
 	}
-	val2 := res.Picmap["mike"]["square"].String()
-	require.Equal(t, val, val2)
-	res, err = source.LoadUsers(ctx, []string{"mike"}, []keybase1.AvatarFormat{"square"})
+	mikePath2 := res.Picmap["mike"]["square"].String()
+	require.Equal(t, mikePath, mikePath2)
+	res, err = source.LoadUsers(m, []string{"mike"}, []keybase1.AvatarFormat{"square"})
 	require.NoError(t, err)
 	select {
 	case <-cb:
@@ -125,14 +128,51 @@ func TestAvatarsFullCaching(t *testing.T) {
 		require.Fail(t, "no populate")
 	default:
 	}
-	val2 = res.Picmap["mike"]["square"].String()
-	require.Equal(t, val2, val)
-	require.Equal(t, "hi2", getFile(val2))
+	mikePath2 = res.Picmap["mike"]["square"].String()
+	require.Equal(t, mikePath2, mikePath)
+	require.Equal(t, "hi2", getFile(mikePath2))
 
-	err = source.ClearCacheForName(context.Background(), "mike", []keybase1.AvatarFormat{"square"})
+	// load a second user to validate we clear when the LRU is full
+	res, err = source.LoadUsers(m, []string{"josh"}, []keybase1.AvatarFormat{"square"})
+	require.NoError(t, err)
+	require.Equal(t, testSrvAddr, res.Picmap["josh"]["square"].String())
+	select {
+	case <-cb:
+	case <-time.After(20 * time.Second):
+		require.Fail(t, "no API call")
+	}
+	select {
+	case <-source.populateSuccessCh:
+	case <-time.After(20 * time.Second):
+		require.Fail(t, "no populate")
+	}
+
+	res, err = source.LoadUsers(m, []string{"josh"}, []keybase1.AvatarFormat{"square"})
+	require.NoError(t, err)
+	select {
+	case <-cb:
+		require.Fail(t, "no API call")
+	default:
+	}
+	select {
+	case <-source.populateSuccessCh:
+		require.Fail(t, "no populate")
+	default:
+	}
+	joshPath := res.Picmap["josh"]["square"].String()
+	require.NotEqual(t, testSrvAddr, mikePath2)
+	require.True(t, strings.HasPrefix(joshPath, "file://"))
+	require.Equal(t, "hi2", getFile(joshPath))
+
+	// mike was evicted
+	_, err = os.Stat(convertPath(mikePath2))
+	require.Error(t, err)
+	require.True(t, os.IsNotExist(err))
+
+	err = source.ClearCacheForName(m, "josh", []keybase1.AvatarFormat{"square"})
 	require.NoError(t, err)
 
-	_, err = os.Stat(convertPath(val2))
+	_, err = os.Stat(convertPath(joshPath))
 	require.Error(t, err)
 	require.True(t, os.IsNotExist(err))
 }

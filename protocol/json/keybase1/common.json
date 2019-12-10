@@ -67,6 +67,13 @@
     },
     {
       "type": "record",
+      "name": "VID",
+      "fields": [],
+      "typedef": "string",
+      "lint": "ignore"
+    },
+    {
+      "type": "record",
       "name": "DeviceID",
       "fields": [],
       "typedef": "string"
@@ -91,9 +98,27 @@
     },
     {
       "type": "record",
+      "name": "PhoneNumber",
+      "fields": [],
+      "typedef": "string"
+    },
+    {
+      "type": "record",
+      "name": "RawPhoneNumber",
+      "fields": [],
+      "typedef": "string"
+    },
+    {
+      "type": "record",
       "name": "LinkID",
       "fields": [],
       "typedef": "string"
+    },
+    {
+      "type": "record",
+      "name": "BinaryLinkID",
+      "fields": [],
+      "typedef": "bytes"
     },
     {
       "type": "record",
@@ -226,9 +251,12 @@
       "type": "enum",
       "name": "SeqType",
       "symbols": [
+        "NONE_0",
         "PUBLIC_1",
         "PRIVATE_2",
-        "SEMIPRIVATE_3"
+        "SEMIPRIVATE_3",
+        "USER_PRIVATE_HIDDEN_16",
+        "TEAM_PRIVATE_HIDDEN_17"
       ]
     },
     {
@@ -391,6 +419,10 @@
           "name": "deviceID"
         },
         {
+          "type": "int",
+          "name": "deviceNumberOfType"
+        },
+        {
           "type": "Time",
           "name": "cTime"
         },
@@ -459,6 +491,24 @@
         "GUI_HELPER_4"
       ],
       "go": "nostring"
+    },
+    {
+      "type": "record",
+      "name": "KBFSPathInfo",
+      "fields": [
+        {
+          "type": "string",
+          "name": "standardPath"
+        },
+        {
+          "type": "string",
+          "name": "deeplinkPath"
+        },
+        {
+          "type": "string",
+          "name": "platformAfterMountPath"
+        }
+      ]
     },
     {
       "type": "record",
@@ -677,22 +727,7 @@
           "name": "service"
         }
       ],
-      "doc": "SocialAssertion contains a service and username for that service, that\n    together form an assertion about a user. Resolving an assertion requires\n    that the user posts a Keybase proof on the asserted service as the asserted\n    user."
-    },
-    {
-      "type": "record",
-      "name": "UserResolution",
-      "fields": [
-        {
-          "type": "SocialAssertion",
-          "name": "assertion"
-        },
-        {
-          "type": "UID",
-          "name": "userID"
-        }
-      ],
-      "doc": "UserResolution maps how an unresolved user assertion has been resolved."
+      "doc": "SocialAssertion contains a service and username for that service, that\n    together form an assertion about a user. It can either be a social\n    assertion (like \"facebook\" or \"twitter\") or a server trust assertion (like\n    \"phone\" or \"email\").\n\n    If the assertion is for social network, resolving an assertion requires\n    that the user posts a Keybase proof on the asserted service as the asserted\n    user.\n\n    For server trust assertion, we have to trust the server."
     },
     {
       "type": "record",
@@ -754,6 +789,77 @@
         {
           "type": "int",
           "name": "y1"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "PhoneLookupResult",
+      "fields": [
+        {
+          "type": "UID",
+          "name": "uid"
+        },
+        {
+          "type": "string",
+          "name": "username"
+        },
+        {
+          "type": "UnixTime",
+          "name": "ctime"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "name": "IdentityVisibility",
+      "symbols": [
+        "PRIVATE_0",
+        "PUBLIC_1"
+      ]
+    },
+    {
+      "type": "record",
+      "name": "SizedImage",
+      "fields": [
+        {
+          "type": "string",
+          "name": "path"
+        },
+        {
+          "type": "int",
+          "name": "width"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "name": "OfflineAvailability",
+      "symbols": [
+        "NONE_0",
+        "BEST_EFFORT_1"
+      ]
+    },
+    {
+      "type": "record",
+      "name": "ReacjiSkinTone",
+      "fields": [],
+      "typedef": "int"
+    },
+    {
+      "type": "record",
+      "name": "UserReacjis",
+      "fields": [
+        {
+          "type": {
+            "type": "array",
+            "items": "string"
+          },
+          "name": "topReacjis"
+        },
+        {
+          "type": "ReacjiSkinTone",
+          "name": "skinTone"
         }
       ]
     }

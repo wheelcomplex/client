@@ -29,6 +29,9 @@ protocol Common {
   @typedef("string")
   record UID {}
 
+  @typedef("string") @lint("ignore")
+  record VID {}
+
   @typedef("string")
   record DeviceID {}
 
@@ -42,9 +45,22 @@ protocol Common {
   @typedef("string")
   record KID {}
 
+  // Phone number in E.164 format.
+  @typedef("string")
+  record PhoneNumber {}
+
+  // Phone number, coming from the user, in no particular format.
+  // Possibly invalid. Should be validated and converted to PhoneNumber
+  // for internal use.
+  @typedef("string")
+  record RawPhoneNumber {}
+
   // Chain link IDs
   @typedef("string")
   record LinkID {}
+
+  @typedef("bytes")
+  record BinaryLinkID {}
 
   // But sometimes we need binary kids...
   @typedef("bytes")
@@ -103,9 +119,12 @@ protocol Common {
   record Seqno {}
 
   enum SeqType {
+    NONE_0,
     PUBLIC_1,
     PRIVATE_2,
-    SEMIPRIVATE_3
+    SEMIPRIVATE_3,
+    USER_PRIVATE_HIDDEN_16,
+    TEAM_PRIVATE_HIDDEN_17
   }
 
   fixed Bytes32(32);
@@ -159,6 +178,8 @@ protocol Common {
     string type;
     string name;
     DeviceID deviceID;
+    // For the GUI to display the correct icon for the device
+    int deviceNumberOfType;
     Time cTime;
     Time mTime;
     Time lastUsedTime;
@@ -194,6 +215,12 @@ protocol Common {
     GUI_MAIN_2,
     KBFS_3,
     GUI_HELPER_4
+  }
+
+  record KBFSPathInfo {
+    string standardPath;
+    string deeplinkPath;
+    string platformAfterMountPath;
   }
 
   record UserVersionVector {
@@ -291,21 +318,19 @@ protocol Common {
 
   /**
     SocialAssertion contains a service and username for that service, that
-    together form an assertion about a user. Resolving an assertion requires
+    together form an assertion about a user. It can either be a social
+    assertion (like "facebook" or "twitter") or a server trust assertion (like
+    "phone" or "email").
+
+    If the assertion is for social network, resolving an assertion requires
     that the user posts a Keybase proof on the asserted service as the asserted
     user.
+
+    For server trust assertion, we have to trust the server.
     */
   record SocialAssertion {
       string user;
       SocialAssertionService service;
-  }
-
-  /**
-    UserResolution maps how an unresolved user assertion has been resolved.
-    */
-  record UserResolution {
-      SocialAssertion assertion;
-      UID userID;
   }
 
   @typedef("string")
@@ -330,5 +355,36 @@ protocol Common {
     int y0;
     int x1;
     int y1;
+  }
+
+  record PhoneLookupResult {
+    UID uid;
+    string username;
+    UnixTime ctime;
+  }
+
+  // Used for searching by phone number or email
+  enum IdentityVisibility {
+      PRIVATE_0,
+      PUBLIC_1
+  }
+
+  record SizedImage {
+    string path;
+    int width;
+  }
+
+  enum OfflineAvailability {
+    NONE_0,
+    BEST_EFFORT_1
+  }
+
+  // Primarily used in chat but defined here to avoid a circular import
+  @typedef("int") record ReacjiSkinTone {}
+  record UserReacjis {
+    // sorted array of frequently used reacjis
+    array<string> topReacjis;
+    // user preference for default reacji skin tone
+    ReacjiSkinTone skinTone;
   }
 }

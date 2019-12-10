@@ -12,6 +12,7 @@ import (
 	"github.com/keybase/client/go/engine"
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
+	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/go-framed-msgpack-rpc/rpc"
 )
 
@@ -49,6 +50,11 @@ func (v *CmdPGPGen) Run() (err error) {
 	if err != nil {
 		return err
 	}
+	user, err := GetUserClient(v.G())
+	if err != nil {
+		return err
+	}
+
 	if err = RegisterProtocolsWithContext(protocols, v.G()); err != nil {
 		return err
 	}
@@ -61,9 +67,16 @@ func (v *CmdPGPGen) Run() (err error) {
 	} else if err = v.arg.Gen.CreatePGPIDs(); err != nil {
 		return err
 	}
-	v.arg.PushSecret, err = v.G().UI.GetTerminalUI().PromptYesNo(PromptDescriptorPGPGenPushSecret, "Push an encrypted copy of your new secret key to the Keybase.io server?", libkb.PromptDefaultYes)
+
+	passphraseState, err := user.LoadPassphraseState(context.TODO(), 0)
 	if err != nil {
 		return err
+	}
+	if passphraseState == keybase1.PassphraseState_KNOWN {
+		v.arg.PushSecret, err = v.G().UI.GetTerminalUI().PromptYesNo(PromptDescriptorPGPGenPushSecret, "Push an encrypted copy of your new secret key to the Keybase.io server?", libkb.PromptDefaultYes)
+		if err != nil {
+			return err
+		}
 	}
 	if v.arg.DoExport {
 		v.arg.ExportEncrypted, err = v.G().UI.GetTerminalUI().PromptYesNo(PromptDescriptorPGPGenEncryptSecret, "When exporting to the GnuPG keychain, encrypt private keys with a passphrase?", libkb.PromptDefaultYes)
@@ -186,11 +199,9 @@ func NewCmdPGPGen(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Comman
    (LKS) protocol. (For more information, try 'keybase help keyring').
 
    Also, by default, the public **and secret** halves of the new PGP key
-   are exported to the local GnuPG keyring, if one is found. Unless the
-   "--unencrypted" flag is provided, you will be asked to provide a
-   passphrase to encrypt the key in the GnuPG keyring. You can specify
-   "--no-export" to stop the export of the newly generated key to the
-   GnuPG keyring.
+   are exported to the local GnuPG keyring, if one is found. You can
+   specify "--no-export" to stop the export of the newly generated key
+   to the GnuPG keyring.
 
    On subsequent secret key accesses --- say for PGP decryption or
    for signing --- access to the local GnuPG keyring is not required.

@@ -83,8 +83,15 @@ protocol UPK {
       array<PerUserKey> perUserKeys;
       map<KID, PublicKeyV2NaCl> deviceKeys;
       map<KID, PublicKeyV2PGPSummary> pgpKeys;
+      union { null, string } stellarAccountID;
       map<UID, RemoteTrack> remoteTracks;
       union { null, ResetSummary } reset;
+
+      // Unstubbed is true if no links in the User were stubbed when this
+      // UPAK was derived.
+      // Field introduced in 2.6 of UPAKs, so not all 2.6 stored UPAKs have this. We'll therefore
+      // assume that stored upaks are stubbed by default.
+      boolean unstubbed;
   }
 
   record UserPlusKeysV2AllIncarnations {
@@ -95,6 +102,9 @@ protocol UPK {
       map<Seqno, LinkID> seqnoLinkIDs;
       // When we bump the minor version, bust the cache, and force a refresh
       UPK2MinorVersion minorVersion;
+      // We can be marked stale via gregor, but it's still ok to load if we're offline
+      // in some settings.
+      boolean stale;
   }
 
   enum UPAKVersion {
@@ -111,5 +121,28 @@ protocol UPK {
       case V2: UserPlusKeysV2AllIncarnations;
   }
 
+  enum UPKLiteMinorVersion {
+      V0_0
+  }
+
+  // only latest incarnation
+  @lint("ignore")
+  record UPKLiteV1 {
+      UID uid;
+      string username;
+      Seqno eldestSeqno;
+      StatusCode status;
+      // Sorted by generation ascending
+      map<KID, PublicKeyV2NaCl> deviceKeys;
+      union { null, ResetSummary } reset;
+  }
+
+  @lint("ignore")
+  record UPKLiteV1AllIncarnations {
+      UPKLiteV1 current;
+      array<UPKLiteV1> pastIncarnations;
+      map<Seqno, LinkID> seqnoLinkIDs;
+      UPKLiteMinorVersion minorVersion;
+  }
 
 }

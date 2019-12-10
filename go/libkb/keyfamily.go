@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"sort"
 	"time"
 
+	"github.com/keybase/client/go/kbcrypto"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 	jsonw "github.com/keybase/go-jsonw"
 )
@@ -468,7 +470,10 @@ func ParseKeyFamily(g *GlobalContext, jw *jsonw.Wrapper) (ret *KeyFamily, err er
 				kf.pgp2kid[fp] = kid
 				kf.kid2pgp[kid] = fp
 			}
-			ks.addKey(pgp)
+			err = ks.addKey(pgp)
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			kf.SingleKeys[kid] = newKey
 		}
@@ -542,7 +547,7 @@ func (ckf ComputedKeyFamily) FindActiveSibkeyAtTime(kid keybase1.KID, t time.Tim
 	if liveCki == nil || err != nil {
 		// err gets returned.
 	} else if !liveCki.Sibkey {
-		err = BadKeyError{fmt.Sprintf("The key '%s' wasn't delegated as a sibkey", kid)}
+		err = kbcrypto.BadKeyError{Msg: fmt.Sprintf("The key '%s' wasn't delegated as a sibkey", kid)}
 	} else {
 		key, err = ckf.FindKeyWithKIDUnsafe(kid)
 		cki = *liveCki
@@ -560,14 +565,14 @@ func (ckf ComputedKeyFamily) FindActiveEncryptionSubkey(kid keybase1.KID) (ret G
 		return nil, cki, err
 	}
 	if ckip.Sibkey {
-		return nil, cki, BadKeyError{fmt.Sprintf("The key '%s' was delegated as a sibkey", kid.String())}
+		return nil, cki, kbcrypto.BadKeyError{Msg: fmt.Sprintf("The key '%s' was delegated as a sibkey", kid.String())}
 	}
 	key, err := ckf.FindKeyWithKIDUnsafe(kid)
 	if err != nil {
 		return nil, cki, err
 	}
 	if !CanEncrypt(key) {
-		return nil, cki, BadKeyError{fmt.Sprintf("The key '%s' cannot encrypt", kid.String())}
+		return nil, cki, kbcrypto.BadKeyError{Msg: fmt.Sprintf("The key '%s' cannot encrypt", kid.String())}
 	}
 	return key, *ckip, nil
 }
@@ -1194,17 +1199,32 @@ func (ckf *ComputedKeyFamily) getDeviceForKidHelper(kid keybase1.KID) (ret *Devi
 	return
 }
 
-func (ckf *ComputedKeyFamily) GetAllDevices() []*Device {
-	devices := []*Device{}
+type byAge []*Device
+
+func (a byAge) Len() int           { return len(a) }
+func (a byAge) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a byAge) Less(i, j int) bool { return a[i].CTime < a[j].CTime }
+
+func (ckf *ComputedKeyFamily) GetAllDevices() []DeviceWithDeviceNumber {
+	devicesNoNum := make([]*Device, 0, len(ckf.cki.Devices))
 	for _, device := range ckf.cki.Devices {
-		devices = append(devices, device)
+		devicesNoNum = append(devicesNoNum, device)
+	}
+	sort.Sort(byAge(devicesNoNum))
+	devices := make([]DeviceWithDeviceNumber, 0, len(devicesNoNum))
+	deviceNumMap := make(map[string]int)
+	for _, device := range devicesNoNum {
+
+		devices = append(devices, DeviceWithDeviceNumber{device, deviceNumMap[device.Type]})
+
+		deviceNumMap[device.Type]++
 	}
 	return devices
 }
 
-func (ckf *ComputedKeyFamily) GetAllActiveDevices() []*Device {
-	devices := []*Device{}
-	for _, device := range ckf.cki.Devices {
+func (ckf *ComputedKeyFamily) GetAllActiveDevices() []DeviceWithDeviceNumber {
+	devices := make([]DeviceWithDeviceNumber, 0)
+	for _, device := range ckf.GetAllDevices() {
 		if device.IsActive() {
 			devices = append(devices, device)
 		}
@@ -1257,6 +1277,12 @@ func (ckf ComputedKeyFamily) GetSaltpackSenderTypeIfInactive(kid keybase1.KID) (
 func (ckf *ComputedKeyFamily) GetLatestPerUserKey() *keybase1.PerUserKey {
 	var currentGeneration keybase1.PerUserKeyGeneration
 	var ret *keybase1.PerUserKey
+	if ckf == nil {
+		panic("nil ckf") // with a nil ckf, we can't log and this method will crash anyway.
+	}
+	if ckf.cki == nil {
+		ckf.G().Log.Debug("ComputedKeyFamily#GetLatestPerUserKey: nil cki")
+	}
 	for generation, key := range ckf.cki.PerUserKeys {
 		if generation > currentGeneration {
 			currentGeneration = generation

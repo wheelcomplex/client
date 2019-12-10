@@ -9,6 +9,7 @@ import (
 
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/clockwork"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoginOffline(t *testing.T) {
@@ -21,7 +22,8 @@ func TestLoginOffline(t *testing.T) {
 
 	// do a upak load to make sure it is cached
 	arg := libkb.NewLoadUserByUIDArg(context.TODO(), tc.G, u1.UID())
-	tc.G.GetUPAKLoader().Load(arg)
+	_, _, err := tc.G.GetUPAKLoader().Load(arg)
+	require.NoError(t, err)
 
 	// Simulate restarting the service by wiping out the
 	// passphrase stream cache and cached secret keys
@@ -32,19 +34,20 @@ func TestLoginOffline(t *testing.T) {
 	prev := os.Getenv("KEYBASE_SERVER_URI")
 	os.Setenv("KEYBASE_SERVER_URI", "http://127.0.0.127:3333")
 	defer os.Setenv("KEYBASE_SERVER_URI", prev)
-	tc.G.ConfigureAPI()
+	err = tc.G.ConfigureAPI()
+	require.NoError(t, err)
 
 	eng := NewLoginOffline(tc.G)
 	m := NewMetaContextForTest(tc)
 	if err := RunEngine2(m, eng); err != nil {
 		t.Fatal(err)
 	}
-	uid, deviceID, deviceName, skey, ekey := tc.G.ActiveDevice.AllFields()
-	if uid.IsNil() {
+	uv, deviceID, deviceName, skey, ekey := tc.G.ActiveDevice.AllFields()
+	if uv.IsNil() {
 		t.Errorf("uid is nil, expected it to exist")
 	}
-	if !uid.Equal(u1.UID()) {
-		t.Errorf("uid: %q, expected %q", uid, u1.UID())
+	if !uv.Uid.Equal(u1.UID()) {
+		t.Errorf("uid: %v, expected %v", uv, u1)
 	}
 
 	if deviceID.IsNil() {
@@ -83,7 +86,8 @@ func TestLoginOfflineDelay(t *testing.T) {
 
 	// do a upak load to make sure it is cached
 	arg := libkb.NewLoadUserByUIDArg(context.TODO(), tc.G, u1.UID())
-	tc.G.GetUPAKLoader().Load(arg)
+	_, _, err := tc.G.GetUPAKLoader().Load(arg)
+	require.NoError(t, err)
 
 	// Simulate restarting the service by wiping out the
 	// passphrase stream cache and cached secret keys
@@ -94,7 +98,8 @@ func TestLoginOfflineDelay(t *testing.T) {
 	prev := os.Getenv("KEYBASE_SERVER_URI")
 	os.Setenv("KEYBASE_SERVER_URI", "http://127.0.0.127:3333")
 	defer os.Setenv("KEYBASE_SERVER_URI", prev)
-	tc.G.ConfigureAPI()
+	err = tc.G.ConfigureAPI()
+	require.NoError(t, err)
 
 	// advance the clock past the cache timeout
 	fakeClock.Advance(libkb.CachedUserTimeout * 10)
@@ -104,12 +109,12 @@ func TestLoginOfflineDelay(t *testing.T) {
 	if err := RunEngine2(m, eng); err != nil {
 		t.Fatal(err)
 	}
-	uid, deviceID, deviceName, skey, ekey := tc.G.ActiveDevice.AllFields()
-	if uid.IsNil() {
+	uv, deviceID, deviceName, skey, ekey := tc.G.ActiveDevice.AllFields()
+	if uv.IsNil() {
 		t.Errorf("uid is nil, expected it to exist")
 	}
-	if !uid.Equal(u1.UID()) {
-		t.Errorf("uid: %q, expected %q", uid, u1.UID())
+	if !uv.Uid.Equal(u1.UID()) {
+		t.Errorf("uid: %v, expected %v", uv, u1.UID())
 	}
 
 	if deviceID.IsNil() {
@@ -150,15 +155,13 @@ func TestLoginOfflineNoUpak(t *testing.T) {
 	prev := os.Getenv("KEYBASE_SERVER_URI")
 	os.Setenv("KEYBASE_SERVER_URI", "http://127.0.0.127:3333")
 	defer os.Setenv("KEYBASE_SERVER_URI", prev)
-	tc.G.ConfigureAPI()
+	err := tc.G.ConfigureAPI()
+	require.NoError(t, err)
 
 	eng := NewLoginOffline(tc.G)
 	m := NewMetaContextForTest(tc)
-	err := RunEngine2(m, eng)
-	if err == nil {
-		t.Fatal("LoginOffline worked after upak cache invalidation")
-	}
-	if _, ok := err.(libkb.LoginRequiredError); !ok {
-		t.Fatalf("LoginOffline error: %s (%T) expected libkb.LoginRequiredError", err, err)
+	err = RunEngine2(m, eng)
+	if err != nil {
+		t.Fatalf("LoginOffline should still work after upak cache invalidation; got %s", err)
 	}
 }

@@ -5,12 +5,15 @@ import (
 	"sort"
 
 	"golang.org/x/net/context"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/keybase1"
 )
 
+// newProofTerm creates a new proof term.
+// `lm` can be nil (it is for teams since SetTeamLinkMap is used)
 func newProofTerm(i keybase1.UserOrTeamID, s keybase1.SignatureMetadata, lm linkMapT) proofTerm {
 	return proofTerm{leafID: i, sigMeta: s, linkMap: lm}
 }
@@ -110,7 +113,9 @@ func (p *proofSetT) AddNeededHappensBeforeProof(ctx context.Context, a proofTerm
 
 	var action string
 	defer func() {
-		p.G().Log.CDebugf(ctx, "proofSet add(%v --> %v) [%v] '%v'", a.shortForm(), b.shortForm(), action, reason)
+		if action != "discard-easy" && !ShouldSuppressLogging(ctx) {
+			p.G().Log.CDebugf(ctx, "proofSet add(%v --> %v) [%v] '%v'", a.shortForm(), b.shortForm(), action, reason)
+		}
 	}()
 
 	idx := newProofIndex(a.leafID, b.leafID)
@@ -151,7 +156,6 @@ func (p *proofSetT) AddNeededHappensBeforeProof(ctx context.Context, a proofTerm
 	}
 	action = "added"
 	p.proofs[idx] = append(p.proofs[idx], proof{a, b, reason})
-	return
 }
 
 // Set the latest link map for the team
@@ -187,10 +191,7 @@ func (p *proofSetT) AllProofs() []proof {
 			return false
 		}
 		cs = ret[i].b.sigMeta.SigChainLocation.Seqno - ret[j].b.sigMeta.SigChainLocation.Seqno
-		if cs < 0 {
-			return true
-		}
-		return false
+		return cs < 0
 	})
 	return ret
 }
@@ -198,10 +199,10 @@ func (p *proofSetT) AllProofs() []proof {
 // lookupMerkleTreeChain loads the path up to the merkle tree and back down that corresponds
 // to this proof. It will contact the API server.  Returns the sigchain tail on success.
 func (p proof) lookupMerkleTreeChain(ctx context.Context, world LoaderContext) (ret *libkb.MerkleTriple, err error) {
-	return world.merkleLookupTripleAtHashMeta(ctx, p.a.isPublic(), p.a.leafID, p.b.sigMeta.PrevMerkleRootSigned.HashMeta)
+	return world.merkleLookupTripleInPast(ctx, p.a.isPublic(), p.a.leafID, p.b.sigMeta.PrevMerkleRootSigned)
 }
 
-// check a single proof. Call to the merkle API enddpoint, and then ensure that the
+// check a single proof. Call to the merkle API endpoint, and then ensure that the
 // data that comes back fits the proof and previously checked sigchain links.
 func (p proof) check(ctx context.Context, g *libkb.GlobalContext, world LoaderContext, proofSet *proofSetT) (err error) {
 	defer func() {
@@ -273,9 +274,17 @@ func (p proof) findLink(ctx context.Context, g *libkb.GlobalContext, world Loade
 	return linkID, nil
 }
 
+func (p *proofSetT) checkRequired() bool {
+	return len(p.proofs) > 0
+}
+
 // check the entire proof set, failing if any one proof fails.
-func (p *proofSetT) check(ctx context.Context, world LoaderContext) (err error) {
+func (p *proofSetT) check(ctx context.Context, world LoaderContext, parallel bool) (err error) {
 	defer p.G().CTrace(ctx, "TeamLoader proofSet check", func() error { return err })()
+
+	if parallel {
+		return p.checkParallel(ctx, world)
+	}
 
 	var total int
 	for _, v := range p.proofs {
@@ -285,9 +294,7 @@ func (p *proofSetT) check(ctx context.Context, world LoaderContext) (err error) 
 	var i int
 	for _, v := range p.proofs {
 		for _, proof := range v {
-			if i%100 == 0 {
-				p.G().Log.CDebugf(ctx, "TeamLoader proofSet check [%v / %v]", i, total)
-			}
+			p.G().Log.CDebugf(ctx, "TeamLoader proofSet check [%v / %v]", i, total)
 			err = proof.check(ctx, p.G(), world, p)
 			if err != nil {
 				return err
@@ -296,4 +303,47 @@ func (p *proofSetT) check(ctx context.Context, world LoaderContext) (err error) 
 		}
 	}
 	return nil
+}
+
+// check the entire proof set, failing if any one proof fails. (parallel version)
+func (p *proofSetT) checkParallel(ctx context.Context, world LoaderContext) (err error) {
+
+	var total int
+	for _, v := range p.proofs {
+		total += len(v)
+	}
+	p.G().Log.CDebugf(ctx, "TeamLoader proofSet check parallel [%v]", total)
+
+	queue := make(chan proof)
+	go func() {
+		for _, v := range p.proofs {
+			for _, proof := range v {
+				queue <- proof
+			}
+		}
+		close(queue)
+	}()
+
+	group, ctx := errgroup.WithContext(libkb.CopyTagsToBackground(ctx))
+	const pipeline = 20
+	for i := 0; i < pipeline; i++ {
+		group.Go(func() error {
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case proof, ok := <-queue:
+					if !ok {
+						return nil
+					}
+					err = proof.check(ctx, p.G(), world, p)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		})
+	}
+
+	return group.Wait()
 }

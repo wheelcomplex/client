@@ -88,7 +88,7 @@ func (p *provisioner) run() (err error) {
 }
 
 func (k KexBaseArg) getDeviceID() (ret DeviceID, err error) {
-	err = k.DeviceID.ToBytes([]byte(ret[:]))
+	err = k.DeviceID.ToBytes(ret[:])
 	return ret, err
 }
 
@@ -119,7 +119,7 @@ func (p *provisioner) pickFirstConnection() (err error) {
 			return err
 		}
 		prot := keybase1.Kex2ProvisionerProtocol(p)
-		xp = rpc.NewTransport(conn, p.arg.Provisioner.GetLogFactory(), nil)
+		xp = rpc.NewTransport(conn, p.arg.Provisioner.GetLogFactory(), nil, rpc.DefaultMaxFrameLength)
 		srv := rpc.NewServer(xp, nil)
 		if err = srv.Register(prot); err != nil {
 			return err
@@ -141,7 +141,7 @@ func (p *provisioner) pickFirstConnection() (err error) {
 		if p.conn, err = NewConn(p.arg.Ctx, p.arg.LogCtx, p.arg.Mr, sec, p.deviceID, p.arg.Timeout); err != nil {
 			return err
 		}
-		p.xp = rpc.NewTransport(p.conn, p.arg.Provisioner.GetLogFactory(), nil)
+		p.xp = rpc.NewTransport(p.conn, p.arg.Provisioner.GetLogFactory(), nil, rpc.DefaultMaxFrameLength)
 	case <-p.arg.Ctx.Done():
 		err = ErrCanceled
 	case <-time.After(p.arg.Timeout):

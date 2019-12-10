@@ -262,6 +262,27 @@ func (o ObjFactory) MakeTimeOrOffsetFromOffset(d time.Duration) (gregor.TimeOrOf
 	return TimeOrOffset{Offset_: DurationMsec(d / time.Millisecond)}, nil
 }
 
+func (o ObjFactory) ExportTimeOrOffset(t gregor.TimeOrOffset) TimeOrOffset {
+	if t.Time() != nil {
+		return TimeOrOffset{
+			Time_: ToTime(*t.Time()),
+		}
+	}
+	if t.Offset() != nil {
+		return TimeOrOffset{
+			Offset_: DurationMsec(*t.Offset() / time.Millisecond),
+		}
+	}
+	return TimeOrOffset{}
+}
+
+func (o ObjFactory) ExportTimeOrOffsets(ts []gregor.TimeOrOffset) (res []TimeOrOffset) {
+	for _, t := range ts {
+		res = append(res, o.ExportTimeOrOffset(t))
+	}
+	return res
+}
+
 func (o ObjFactory) MakeReminderID(u gregor.UID, msgid gregor.MsgID, seqno int) (gregor.ReminderID, error) {
 	return ReminderID{Uid_: u.Bytes(), MsgID_: msgid.Bytes(), Seqno_: seqno}, nil
 }

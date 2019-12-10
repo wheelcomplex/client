@@ -4,6 +4,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	stellar1 "github.com/keybase/client/go/protocol/stellar1"
@@ -64,23 +65,23 @@ func ParseStellarSecretKey(secStr string) (stellar1.SecretKey, stellar1.AccountI
 func ParseStellarAccountID(idStr string) (stellar1.AccountID, error) {
 	idStr = strings.ToUpper(idStr)
 	if len(idStr) != 56 {
-		return "", fmt.Errorf("Stellar account ID must be 56 chars long: was %v", len(idStr))
+		return "", NewInvalidStellarAccountIDError(fmt.Sprintf("Stellar account ID must be 56 chars long: was %v", len(idStr)))
 	}
 	_, err := base32.StdEncoding.DecodeString(idStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid characters in Stellar account ID")
+		return "", NewInvalidStellarAccountIDError("invalid characters in Stellar account ID")
 	}
 	kp, err := keypair.Parse(idStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid Stellar account ID key: %v", err)
+		return "", NewInvalidStellarAccountIDError(fmt.Sprintf("invalid Stellar account ID key: %s", err))
 	}
 	switch kp := kp.(type) {
 	case *keypair.FromAddress:
 		return stellar1.AccountID(kp.Address()), nil
 	case *keypair.Full:
-		return "", errors.New("unexpected Stellar secret key, expected account ID")
+		return "", NewInvalidStellarAccountIDError("unexpected Stellar secret key, expected account ID")
 	default:
-		return "", fmt.Errorf("invalid Stellar account ID")
+		return "", NewInvalidStellarAccountIDError("invalid keypair type")
 	}
 }
 
@@ -95,8 +96,29 @@ func StellarSimplifyAmount(amount string) string {
 		return amount
 	}
 	simpleRight := strings.TrimRight(sides[1], "0")
-	if len(simpleRight) == 0 {
+	if strings.Contains(sides[0], ",") {
+		// If integer part has the thousands separator (comma), always
+		// print the fractional part with at least two digits - this
+		// is to ensure that thousands separator is not confused with
+		// decimal point.
+		for len(simpleRight) < 2 {
+			simpleRight += "0"
+		}
+	} else if len(simpleRight) == 0 {
 		return sides[0]
 	}
 	return sides[0] + "." + simpleRight
+}
+
+var assetCodePattern = regexp.MustCompile(`^[a-zA-Z0-9]{1,12}$`)
+
+func ParseStellarAssetCode(codeStr string) (res stellar1.AssetCode, err error) {
+	if len(codeStr) < 1 && len(codeStr) > 12 {
+		return res, fmt.Errorf("asset code must be between 1 and 12 characters long")
+	}
+	if !assetCodePattern.MatchString(codeStr) {
+		return res, fmt.Errorf("asset code must contain alphanumeric characters only")
+	}
+	fmt.Printf("%s parsed\n", codeStr)
+	return stellar1.AssetCode(codeStr), nil
 }

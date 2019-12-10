@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/keybase/client/go/kbcrypto"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/go-crypto/openpgp"
 	"github.com/keybase/go-crypto/openpgp/armor"
@@ -57,18 +58,23 @@ const (
 
 type PGPFingerprint [PGPFingerprintLen]byte
 
+func ImportPGPFingerprint(f keybase1.PGPFingerprint) PGPFingerprint {
+	var ret PGPFingerprint
+	copy(ret[:], f[:])
+	return ret
+}
+
 func PGPFingerprintFromHex(s string) (*PGPFingerprint, error) {
 	var fp PGPFingerprint
-	n, err := hex.Decode([]byte(fp[:]), []byte(s))
-	var ret *PGPFingerprint
-	if err != nil {
-		// Noop
-	} else if n != PGPFingerprintLen {
-		err = fmt.Errorf("Bad fingerprint; wrong length: %d", n)
-	} else {
-		ret = &fp
+	err := DecodeHexFixed(fp[:], []byte(s))
+	switch err.(type) {
+	case nil:
+		return &fp, nil
+	case HexWrongLengthError:
+		return nil, fmt.Errorf("Bad fingerprint; wrong length: %d", len(s))
+	default:
+		return nil, err
 	}
-	return ret, err
 }
 
 func PGPFingerprintFromSlice(b []byte) (*PGPFingerprint, error) {
@@ -224,7 +230,7 @@ func (p *PGPFingerprint) MarshalJSON() ([]byte, error) {
 }
 
 func (k PGPKeyBundle) toList() openpgp.EntityList {
-	list := make(openpgp.EntityList, 1, 1)
+	list := make(openpgp.EntityList, 1)
 	list[0] = k.Entity
 	return list
 }
@@ -275,7 +281,7 @@ func (k *PGPKeyBundle) Encode() (ret string, err error) {
 	buf := bytes.Buffer{}
 	err = k.EncodeToStream(NopWriteCloser{&buf}, false)
 	if err == nil {
-		ret = string(buf.Bytes())
+		ret = buf.String()
 		k.ArmoredPublicKey = ret
 	}
 	return
@@ -586,9 +592,9 @@ func (k *PGPKeyBundle) CheckSecretKey() (err error) {
 	if k.PrivateKey == nil {
 		err = NoSecretKeyError{}
 	} else if k.PrivateKey.Encrypted {
-		err = BadKeyError{"PGP key material should be unencrypted"}
+		err = kbcrypto.BadKeyError{Msg: "PGP key material should be unencrypted"}
 	} else if !FindPGPPrivateKey(k) && k.GPGFallbackKey == nil {
-		err = BadKeyError{"no private key material or GPGKey"}
+		err = kbcrypto.BadKeyError{Msg: "no private key material or GPGKey"}
 	}
 	return
 }
@@ -600,7 +606,7 @@ func (k *PGPKeyBundle) CanSign() bool {
 func (k *PGPKeyBundle) GetBinaryKID() keybase1.BinaryKID {
 
 	prefix := []byte{
-		byte(KeybaseKIDV1),
+		byte(kbcrypto.KeybaseKIDV1),
 		byte(k.PrimaryKey.PubKeyAlgo),
 	}
 
@@ -612,7 +618,7 @@ func (k *PGPKeyBundle) GetBinaryKID() keybase1.BinaryKID {
 	// have 9 bytes of header material, to encode a 2-byte frame, rather than
 	// a 1-byte frame.
 	buf := bytes.Buffer{}
-	k.PrimaryKey.Serialize(&buf)
+	_ = k.PrimaryKey.Serialize(&buf)
 	byts := buf.Bytes()
 	hdrBytes := 8
 	if len(byts) >= 193 {
@@ -621,7 +627,7 @@ func (k *PGPKeyBundle) GetBinaryKID() keybase1.BinaryKID {
 	sum := sha256.Sum256(buf.Bytes()[hdrBytes:])
 
 	out := append(prefix, sum[:]...)
-	out = append(out, byte(IDSuffixKID))
+	out = append(out, byte(kbcrypto.IDSuffixKID))
 
 	return keybase1.BinaryKID(out)
 }
@@ -630,8 +636,8 @@ func (k *PGPKeyBundle) GetKID() keybase1.KID {
 	return k.GetBinaryKID().ToKID()
 }
 
-func (k PGPKeyBundle) GetAlgoType() AlgoType {
-	return AlgoType(k.PrimaryKey.PubKeyAlgo)
+func (k PGPKeyBundle) GetAlgoType() kbcrypto.AlgoType {
+	return kbcrypto.AlgoType(k.PrimaryKey.PubKeyAlgo)
 }
 
 func (k PGPKeyBundle) KeyDescription() string {
@@ -709,7 +715,7 @@ func (k *PGPKeyBundle) unlockAllPrivateKeys(pw string) error {
 
 func (k *PGPKeyBundle) Unlock(m MetaContext, reason string, secretUI SecretUI) error {
 	if !k.isAnyKeyEncrypted() {
-		m.CDebugf("Key is not encrypted, skipping Unlock.")
+		m.Debug("Key is not encrypted, skipping Unlock.")
 		return nil
 	}
 
@@ -772,9 +778,9 @@ func (k PGPKeyBundle) VerifyString(ctx VerifyContext, sig string, msg []byte) (i
 	return
 }
 
-func IsPGPAlgo(algo AlgoType) bool {
+func IsPGPAlgo(algo kbcrypto.AlgoType) bool {
 	switch algo {
-	case KIDPGPRsa, KIDPGPElgamal, KIDPGPDsa, KIDPGPEcdh, KIDPGPEcdsa, KIDPGPBase, KIDPGPEddsa:
+	case kbcrypto.KIDPGPRsa, kbcrypto.KIDPGPElgamal, kbcrypto.KIDPGPDsa, kbcrypto.KIDPGPEcdh, kbcrypto.KIDPGPEcdsa, kbcrypto.KIDPGPBase, kbcrypto.KIDPGPEddsa:
 		return true
 	}
 	return false
@@ -917,12 +923,16 @@ func (p PGPFingerprint) GetProofType() keybase1.ProofType {
 func EncryptPGPKey(bundle *openpgp.Entity, passphrase string) error {
 	passBytes := []byte(passphrase)
 
-	if err := bundle.PrivateKey.Encrypt(passBytes, nil); err != nil {
-		return err
+	if bundle.PrivateKey != nil && bundle.PrivateKey.PrivateKey != nil {
+		// Primary private key exists and is not stubbed.
+		if err := bundle.PrivateKey.Encrypt(passBytes, nil); err != nil {
+			return err
+		}
 	}
 
 	for _, subkey := range bundle.Subkeys {
-		if subkey.PrivateKey == nil {
+		if subkey.PrivateKey == nil || subkey.PrivateKey.PrivateKey == nil {
+			// There has to be a private key and not stubbed.
 			continue
 		}
 

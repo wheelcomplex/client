@@ -14,10 +14,16 @@ import (
 	"github.com/keybase/go-codec/codec"
 )
 
-func (u UID) Bytes() []byte  { return []byte(u) }
-func (u UID) String() string { return hex.EncodeToString(u) }
-func (u UID) Eq(other UID) bool {
-	return bytes.Equal(u.Bytes(), other.Bytes())
+func (u UID) Bytes() []byte     { return []byte(u) }
+func (u UID) String() string    { return hex.EncodeToString(u) }
+func (u UID) Eq(other UID) bool { return bytes.Equal(u.Bytes(), other.Bytes()) }
+func (u UID) IsNil() bool       { return len(u) == 0 }
+
+func UIDPtrEq(x, y *UID) bool {
+	if x != nil && y != nil {
+		return (*x).Eq(*y)
+	}
+	return (x == nil) && (y == nil)
 }
 
 func (d DeviceID) Bytes() []byte  { return []byte(d) }
@@ -435,8 +441,16 @@ func ToDurationMsec(d time.Duration) DurationMsec {
 	return DurationMsec(d / time.Millisecond)
 }
 
+func (d DurationMsec) ToDuration() time.Duration {
+	return time.Duration(d) * time.Millisecond
+}
+
 func ToDurationSec(d time.Duration) DurationSec {
 	return DurationSec(d / time.Second)
+}
+
+func (d DurationSec) ToDuration() time.Duration {
+	return time.Duration(d) * time.Second
 }
 
 // DeviceID returns the deviceID in a SyncArc, or interface nil

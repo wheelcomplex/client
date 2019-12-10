@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/keybase/client/go/kbcrypto"
 	"github.com/keybase/client/go/libkb"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 )
@@ -94,7 +95,7 @@ func (e *DeviceHistory) loadDevices(m libkb.MetaContext, user *libkb.User) error
 	}
 
 	for _, d := range ckf.GetAllDevices() {
-		exp := keybase1.DeviceDetail{Device: *(d.ProtExport())}
+		exp := keybase1.DeviceDetail{Device: *(d.ProtExportWithDeviceNum())}
 		cki, ok := ckis.Infos[d.Kid]
 		if !ok {
 			return fmt.Errorf("no ComputedKeyInfo for device %s, kid %s", d.ID, d.Kid)
@@ -158,9 +159,9 @@ func (e *DeviceHistory) loadDevices(m libkb.MetaContext, user *libkb.User) error
 	return nil
 }
 
-func (e *DeviceHistory) provisioner(m libkb.MetaContext, d *libkb.Device, ckis *libkb.ComputedKeyInfos, info *libkb.ComputedKeyInfo) (*libkb.Device, error) {
+func (e *DeviceHistory) provisioner(m libkb.MetaContext, d libkb.DeviceWithDeviceNumber, ckis *libkb.ComputedKeyInfos, info *libkb.ComputedKeyInfo) (*libkb.Device, error) {
 	for _, v := range info.Delegations {
-		if libkb.AlgoType(v.GetKeyType()) != libkb.KIDNaclEddsa {
+		if kbcrypto.AlgoType(v.GetKeyType()) != kbcrypto.KIDNaclEddsa {
 			// only concerned with device history, not pgp provisioners
 			continue
 		}
@@ -180,7 +181,7 @@ func (e *DeviceHistory) provisioner(m libkb.MetaContext, d *libkb.Device, ckis *
 }
 
 func (e *DeviceHistory) getLastUsedTimes(m libkb.MetaContext) (ret map[keybase1.DeviceID]time.Time, err error) {
-	defer m.CTrace("DeviceHistory#getLastUsedTimes", func() error { return err })()
+	defer m.Trace("DeviceHistory#getLastUsedTimes", func() error { return err })()
 	var devs libkb.DeviceKeyMap
 	var ss *libkb.SecretSyncer
 	ss, err = m.ActiveDevice().SyncSecretsForce(m)

@@ -50,14 +50,6 @@
           "type": "DeviceEkMetadata",
           "name": "currentDeviceEkMetadata",
           "jsonkey": "current_device_ek_metadata"
-        },
-        {
-          "type": {
-            "type": "array",
-            "items": "DeviceEkMetadata"
-          },
-          "name": "existingDeviceEkMetadata",
-          "jsonkey": "existing_device_ek_metadata"
         }
       ]
     },
@@ -83,14 +75,6 @@
           "type": "UserEkMetadata",
           "name": "currentUserEkMetadata",
           "jsonkey": "current_user_ek_metadata"
-        },
-        {
-          "type": {
-            "type": "array",
-            "items": "UserEkMetadata"
-          },
-          "name": "existingUserEkMetadata",
-          "jsonkey": "existing_user_ek_metadata"
         }
       ]
     },
@@ -173,6 +157,24 @@
     },
     {
       "type": "record",
+      "name": "UserEkReboxArg",
+      "fields": [
+        {
+          "type": "UserEkBoxMetadata",
+          "name": "userEkBoxMetadata"
+        },
+        {
+          "type": "DeviceID",
+          "name": "deviceID"
+        },
+        {
+          "type": "string",
+          "name": "deviceEkStatementSig"
+        }
+      ]
+    },
+    {
+      "type": "record",
       "name": "TeamEkMetadata",
       "fields": [
         {
@@ -203,14 +205,6 @@
           "type": "TeamEkMetadata",
           "name": "currentTeamEkMetadata",
           "jsonkey": "current_team_ek_metadata"
-        },
-        {
-          "type": {
-            "type": "array",
-            "items": "TeamEkMetadata"
-          },
-          "name": "existingTeamEkMetadata",
-          "jsonkey": "existing_team_ek_metadata"
         }
       ]
     },
@@ -264,6 +258,123 @@
         {
           "type": "TeamEkMetadata",
           "name": "metadata"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "TeambotEkMetadata",
+      "fields": [
+        {
+          "type": "KID",
+          "name": "kid",
+          "jsonkey": "teambot_dh_public"
+        },
+        {
+          "type": "EkGeneration",
+          "name": "generation"
+        },
+        {
+          "type": "UID",
+          "name": "uid"
+        },
+        {
+          "type": "EkGeneration",
+          "name": "userEkGeneration",
+          "jsonkey": "user_ek_generation"
+        },
+        {
+          "type": "HashMeta",
+          "name": "hashMeta",
+          "jsonkey": "hash_meta"
+        },
+        {
+          "type": "Time",
+          "name": "ctime"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "TeambotEkBoxed",
+      "fields": [
+        {
+          "type": "string",
+          "name": "box"
+        },
+        {
+          "type": "TeambotEkMetadata",
+          "name": "metadata"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "TeambotEk",
+      "fields": [
+        {
+          "type": "Bytes32",
+          "name": "seed"
+        },
+        {
+          "type": "TeambotEkMetadata",
+          "name": "metadata"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "name": "TeamEphemeralKeyType",
+      "symbols": [
+        "TEAM_0",
+        "TEAMBOT_1"
+      ]
+    },
+    {
+      "type": "variant",
+      "name": "TeamEphemeralKey",
+      "switch": {
+        "type": "TeamEphemeralKeyType",
+        "name": "keyType"
+      },
+      "cases": [
+        {
+          "label": {
+            "name": "TEAM",
+            "def": false
+          },
+          "body": "TeamEk"
+        },
+        {
+          "label": {
+            "name": "TEAMBOT",
+            "def": false
+          },
+          "body": "TeambotEk"
+        }
+      ]
+    },
+    {
+      "type": "variant",
+      "name": "TeamEphemeralKeyBoxed",
+      "switch": {
+        "type": "TeamEphemeralKeyType",
+        "name": "keyType"
+      },
+      "cases": [
+        {
+          "label": {
+            "name": "TEAM",
+            "def": false
+          },
+          "body": "TeamEkBoxed"
+        },
+        {
+          "label": {
+            "name": "TEAMBOT",
+            "def": false
+          },
+          "body": "TeambotEkBoxed"
         }
       ]
     }

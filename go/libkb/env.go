@@ -14,25 +14,33 @@ import (
 	"sync"
 	"time"
 
+	logger "github.com/keybase/client/go/logger"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/client/go/systemd"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
 type NullConfiguration struct{}
 
 func (n NullConfiguration) GetHome() string                                                { return "" }
-func (n NullConfiguration) GetServerURI() string                                           { return "" }
+func (n NullConfiguration) GetMobileSharedHome() string                                    { return "" }
+func (n NullConfiguration) GetServerURI() (string, error)                                  { return "", nil }
 func (n NullConfiguration) GetConfigFilename() string                                      { return "" }
 func (n NullConfiguration) GetUpdaterConfigFilename() string                               { return "" }
+func (n NullConfiguration) GetGUIConfigFilename() string                                   { return "" }
+func (n NullConfiguration) GetDeviceCloneStateFilename() string                            { return "" }
 func (n NullConfiguration) GetSessionFilename() string                                     { return "" }
 func (n NullConfiguration) GetDbFilename() string                                          { return "" }
 func (n NullConfiguration) GetChatDbFilename() string                                      { return "" }
 func (n NullConfiguration) GetPvlKitFilename() string                                      { return "" }
+func (n NullConfiguration) GetParamProofKitFilename() string                               { return "" }
+func (n NullConfiguration) GetExternalURLKitFilename() string                              { return "" }
+func (n NullConfiguration) GetProveBypass() (bool, bool)                                   { return false, false }
 func (n NullConfiguration) GetUsername() NormalizedUsername                                { return NormalizedUsername("") }
 func (n NullConfiguration) GetEmail() string                                               { return "" }
-func (n NullConfiguration) GetUpgradePerUserKey() (bool, bool)                             { return false, false }
-func (n NullConfiguration) GetAutoWallet() (bool, bool)                                    { return false, false }
 func (n NullConfiguration) GetProxy() string                                               { return "" }
+func (n NullConfiguration) GetProxyType() string                                           { return "" }
+func (n NullConfiguration) IsCertPinningEnabled() bool                                     { return true }
 func (n NullConfiguration) GetGpgHome() string                                             { return "" }
 func (n NullConfiguration) GetBundledCA(h string) string                                   { return "" }
 func (n NullConfiguration) GetUserCacheMaxAge() (time.Duration, bool)                      { return 0, false }
@@ -69,38 +77,66 @@ func (n NullConfiguration) GetUsernameForUID(u keybase1.UID) NormalizedUsername 
 func (n NullConfiguration) GetUIDForUsername(u NormalizedUsername) keybase1.UID {
 	return keybase1.UID("")
 }
-func (n NullConfiguration) GetAutoFork() (bool, bool)                       { return false, false }
-func (n NullConfiguration) GetRunMode() (RunMode, error)                    { return NoRunMode, nil }
-func (n NullConfiguration) GetNoAutoFork() (bool, bool)                     { return false, false }
-func (n NullConfiguration) GetLogFile() string                              { return "" }
-func (n NullConfiguration) GetLogPrefix() string                            { return "" }
-func (n NullConfiguration) GetScraperTimeout() (time.Duration, bool)        { return 0, false }
-func (n NullConfiguration) GetAPITimeout() (time.Duration, bool)            { return 0, false }
-func (n NullConfiguration) GetTorMode() (TorMode, error)                    { return TorNone, nil }
-func (n NullConfiguration) GetTorHiddenAddress() string                     { return "" }
-func (n NullConfiguration) GetTorProxy() string                             { return "" }
-func (n NullConfiguration) GetUpdatePreferenceAuto() (bool, bool)           { return false, false }
-func (n NullConfiguration) GetUpdatePreferenceSnoozeUntil() keybase1.Time   { return keybase1.Time(0) }
-func (n NullConfiguration) GetUpdateLastChecked() keybase1.Time             { return keybase1.Time(0) }
-func (n NullConfiguration) GetUpdatePreferenceSkip() string                 { return "" }
-func (n NullConfiguration) GetUpdateURL() string                            { return "" }
-func (n NullConfiguration) GetUpdateDisabled() (bool, bool)                 { return false, false }
-func (n NullConfiguration) GetVDebugSetting() string                        { return "" }
-func (n NullConfiguration) GetLocalTrackMaxAge() (time.Duration, bool)      { return 0, false }
-func (n NullConfiguration) GetGregorURI() string                            { return "" }
-func (n NullConfiguration) GetGregorSaveInterval() (time.Duration, bool)    { return 0, false }
-func (n NullConfiguration) GetGregorPingInterval() (time.Duration, bool)    { return 0, false }
-func (n NullConfiguration) GetGregorPingTimeout() (time.Duration, bool)     { return 0, false }
-func (n NullConfiguration) GetChatDelivererInterval() (time.Duration, bool) { return 0, false }
-func (n NullConfiguration) GetGregorDisabled() (bool, bool)                 { return false, false }
-func (n NullConfiguration) GetMountDir() string                             { return "" }
-func (n NullConfiguration) GetBGIdentifierDisabled() (bool, bool)           { return false, false }
-func (n NullConfiguration) GetFeatureFlags() (FeatureFlags, error)          { return FeatureFlags{}, nil }
-func (n NullConfiguration) GetAppType() AppType                             { return NoAppType }
-func (n NullConfiguration) GetSlowGregorConn() (bool, bool)                 { return false, false }
-func (n NullConfiguration) GetRememberPassphrase() (bool, bool)             { return false, false }
-func (n NullConfiguration) GetLevelDBNumFiles() (int, bool)                 { return 0, false }
-func (n NullConfiguration) GetChatInboxSourceLocalizeThreads() (int, bool)  { return 1, false }
+func (n NullConfiguration) GetStayLoggedOut() (bool, bool)                        { return false, false }
+func (n NullConfiguration) GetAutoFork() (bool, bool)                             { return false, false }
+func (n NullConfiguration) GetRunMode() (RunMode, error)                          { return NoRunMode, nil }
+func (n NullConfiguration) GetNoAutoFork() (bool, bool)                           { return false, false }
+func (n NullConfiguration) GetLogFile() string                                    { return "" }
+func (n NullConfiguration) GetEKLogFile() string                                  { return "" }
+func (n NullConfiguration) GetGUILogFile() string                                 { return "" }
+func (n NullConfiguration) GetUseDefaultLogFile() (bool, bool)                    { return false, false }
+func (n NullConfiguration) GetUseRootConfigFile() (bool, bool)                    { return false, false }
+func (n NullConfiguration) GetLogPrefix() string                                  { return "" }
+func (n NullConfiguration) GetScraperTimeout() (time.Duration, bool)              { return 0, false }
+func (n NullConfiguration) GetAPITimeout() (time.Duration, bool)                  { return 0, false }
+func (n NullConfiguration) GetTorMode() (TorMode, error)                          { return TorNone, nil }
+func (n NullConfiguration) GetTorHiddenAddress() string                           { return "" }
+func (n NullConfiguration) GetTorProxy() string                                   { return "" }
+func (n NullConfiguration) GetUpdatePreferenceAuto() (bool, bool)                 { return false, false }
+func (n NullConfiguration) GetUpdatePreferenceSnoozeUntil() keybase1.Time         { return keybase1.Time(0) }
+func (n NullConfiguration) GetUpdateLastChecked() keybase1.Time                   { return keybase1.Time(0) }
+func (n NullConfiguration) GetUpdatePreferenceSkip() string                       { return "" }
+func (n NullConfiguration) GetUpdateURL() string                                  { return "" }
+func (n NullConfiguration) GetUpdateDisabled() (bool, bool)                       { return false, false }
+func (n NullConfiguration) GetVDebugSetting() string                              { return "" }
+func (n NullConfiguration) GetLocalTrackMaxAge() (time.Duration, bool)            { return 0, false }
+func (n NullConfiguration) GetGregorURI() string                                  { return "" }
+func (n NullConfiguration) GetGregorSaveInterval() (time.Duration, bool)          { return 0, false }
+func (n NullConfiguration) GetGregorPingInterval() (time.Duration, bool)          { return 0, false }
+func (n NullConfiguration) GetGregorPingTimeout() (time.Duration, bool)           { return 0, false }
+func (n NullConfiguration) GetChatDelivererInterval() (time.Duration, bool)       { return 0, false }
+func (n NullConfiguration) GetGregorDisabled() (bool, bool)                       { return false, false }
+func (n NullConfiguration) GetSecretStorePrimingDisabled() (bool, bool)           { return false, false }
+func (n NullConfiguration) GetMountDir() string                                   { return "" }
+func (n NullConfiguration) GetMountDirDefault() string                            { return "" }
+func (n NullConfiguration) GetBGIdentifierDisabled() (bool, bool)                 { return false, false }
+func (n NullConfiguration) GetFeatureFlags() (FeatureFlags, error)                { return FeatureFlags{}, nil }
+func (n NullConfiguration) GetAppType() AppType                                   { return NoAppType }
+func (n NullConfiguration) IsMobileExtension() (bool, bool)                       { return false, false }
+func (n NullConfiguration) GetSlowGregorConn() (bool, bool)                       { return false, false }
+func (n NullConfiguration) GetReadDeletedSigChain() (bool, bool)                  { return false, false }
+func (n NullConfiguration) GetRememberPassphrase(NormalizedUsername) (bool, bool) { return false, false }
+func (n NullConfiguration) GetLevelDBNumFiles() (int, bool)                       { return 0, false }
+func (n NullConfiguration) GetChatInboxSourceLocalizeThreads() (int, bool)        { return 1, false }
+func (n NullConfiguration) GetAttachmentHTTPStartPort() (int, bool)               { return 0, false }
+func (n NullConfiguration) GetAttachmentDisableMulti() (bool, bool)               { return false, false }
+func (n NullConfiguration) GetDisableTeamAuditor() (bool, bool)                   { return false, false }
+func (n NullConfiguration) GetDisableMerkleAuditor() (bool, bool)                 { return false, false }
+func (n NullConfiguration) GetDisableSearchIndexer() (bool, bool)                 { return false, false }
+func (n NullConfiguration) GetDisableBgConvLoader() (bool, bool)                  { return false, false }
+func (n NullConfiguration) GetDisableTeamBoxAuditor() (bool, bool)                { return false, false }
+func (n NullConfiguration) GetDisableEKBackgroundKeygen() (bool, bool)            { return false, false }
+func (n NullConfiguration) GetEnableBotLiteMode() (bool, bool)                    { return false, false }
+func (n NullConfiguration) GetExtraNetLogging() (bool, bool)                      { return false, false }
+func (n NullConfiguration) GetForceLinuxKeyring() (bool, bool)                    { return false, false }
+func (n NullConfiguration) GetForceSecretStoreFile() (bool, bool)                 { return false, false }
+func (n NullConfiguration) GetChatOutboxStorageEngine() string                    { return "" }
+func (n NullConfiguration) GetRuntimeStatsEnabled() (bool, bool)                  { return false, false }
+func (n NullConfiguration) GetPassphraseState() *keybase1.PassphraseState         { return nil }
+func (n NullConfiguration) GetPassphraseStateForUsername(NormalizedUsername) *keybase1.PassphraseState {
+	return nil
+}
+
 func (n NullConfiguration) GetBug3964RepairTime(NormalizedUsername) (time.Time, error) {
 	return time.Time{}, nil
 }
@@ -119,9 +155,8 @@ func (n NullConfiguration) GetAllUserConfigs() (*UserConfig, []UserConfig, error
 	return nil, nil, nil
 }
 
-func (n NullConfiguration) GetDebug() (bool, bool) {
-	return false, false
-}
+func (n NullConfiguration) GetDebug() (bool, bool)            { return false, false }
+func (n NullConfiguration) GetDebugJourneycard() (bool, bool) { return false, false }
 func (n NullConfiguration) GetDisplayRawUntrustedOutput() (bool, bool) {
 	return false, false
 }
@@ -150,6 +185,10 @@ func (n NullConfiguration) GetIntAtPath(string) (int, bool) {
 	return 0, false
 }
 
+func (n NullConfiguration) GetFloatAtPath(string) (float64, bool) {
+	return 0, false
+}
+
 func (n NullConfiguration) GetNullAtPath(string) bool {
 	return false
 }
@@ -159,12 +198,13 @@ func (n NullConfiguration) GetSecurityAccessGroupOverride() (bool, bool) {
 }
 
 type TestParameters struct {
-	ConfigFilename string
-	Home           string
-	GPG            string
-	GPGHome        string
-	GPGOptions     []string
-	Debug          bool
+	ConfigFilename   string
+	Home             string
+	MobileSharedHome string
+	GPG              string
+	GPGHome          string
+	GPGOptions       []string
+	Debug            bool
 	// Whether we are in Devel Mode
 	Devel bool
 	// If we're in dev mode, the name for this test, with a random
@@ -172,7 +212,7 @@ type TestParameters struct {
 	DevelName                string
 	RuntimeDir               string
 	DisableUpgradePerUserKey bool
-	DisableAutoWallet        bool
+	EnvironmentFeatureFlags  FeatureFlags
 
 	// set to true to use production run mode in tests
 	UseProductionRunMode bool
@@ -187,10 +227,44 @@ type TestParameters struct {
 	// If we need to use the real clock for NIST generation (as in really
 	// whacky tests liks TestRekey).
 	UseTimeClockForNISTs bool
+
+	// TeamNoHeadMerkleStore is used for testing to emulate older clients
+	// that didn't store the head merkle sequence to team chain state. We
+	// have an upgrade path in the code that we'd like to test.
+	TeamNoHeadMerkleStore bool
+
+	// TeamSkipAudit is on because some team chains are "canned" and therefore
+	// might point off of the merkle sequence in the database. So it's just
+	// easiest to skip the audit in those cases.
+	TeamSkipAudit bool
+
+	// NoGregor is on if we want to test the service without any gregor conection
+	NoGregor bool
+
+	// TeamAuditParams can be customized if we want to control the behavior
+	// of audits deep in a test
+	TeamAuditParams *TeamAuditParams
+
+	// Toggle if we want to try to 'prime' the secret store before using it.
+	SecretStorePrimingDisabled bool
 }
 
 func (tp TestParameters) GetDebug() (bool, bool) {
 	if tp.Debug {
+		return true, true
+	}
+	return false, false
+}
+
+func (tp TestParameters) GetNoGregor() (bool, bool) {
+	if tp.NoGregor {
+		return true, true
+	}
+	return false, false
+}
+
+func (tp TestParameters) GetSecretStorePrimingDisabled() (bool, bool) {
+	if tp.SecretStorePrimingDisabled {
 		return true, true
 	}
 	return false, false
@@ -204,6 +278,7 @@ type Env struct {
 	writer        ConfigWriter
 	Test          *TestParameters
 	updaterConfig UpdaterConfigReader
+	guiConfig     *JSONFile
 }
 
 func (e *Env) GetConfig() ConfigReader {
@@ -237,6 +312,18 @@ func (e *Env) SetConfig(r ConfigReader, w ConfigWriter) {
 	e.writer = w
 }
 
+func (e *Env) SetGUIConfig(j *JSONFile) {
+	e.Lock()
+	defer e.Unlock()
+	e.guiConfig = j
+}
+
+func (e *Env) GetGUIConfig() *JSONFile {
+	e.RLock()
+	defer e.RUnlock()
+	return e.guiConfig
+}
+
 func (e *Env) SetUpdaterConfig(r UpdaterConfigReader) {
 	e.Lock()
 	defer e.Unlock()
@@ -249,41 +336,56 @@ func (e *Env) GetUpdaterConfig() UpdaterConfigReader {
 	return e.updaterConfig
 }
 
+func (e *Env) GetOldMountDirDefault() string {
+	switch RuntimeGroup() {
+	case keybase1.RuntimeGroup_LINUXLIKE:
+		return filepath.Join(e.GetDataDir(), "fs")
+	default:
+		return e.GetMountDirDefault()
+	}
+}
+
+func (e *Env) GetMountDirDefault() string {
+	switch RuntimeGroup() {
+	case keybase1.RuntimeGroup_DARWINLIKE:
+		volumes := "/Volumes"
+		user, err := user.Current()
+		var username string
+		if err != nil {
+			// The iOS simulator may not have a proper user set,
+			username = "<unknown>"
+		} else {
+			username = user.Username
+		}
+		var runmodeName string
+		switch e.GetRunMode() {
+		case DevelRunMode:
+			runmodeName = "KeybaseDevel"
+		case StagingRunMode:
+			runmodeName = "KeybaseStaging"
+		case ProductionRunMode:
+			runmodeName = "Keybase"
+		default:
+			panic("Invalid run mode")
+		}
+		return filepath.Join(volumes, fmt.Sprintf(
+			"%s (%s)", runmodeName, username))
+	case keybase1.RuntimeGroup_LINUXLIKE:
+		return filepath.Join(e.GetRuntimeDir(), "kbfs")
+	// kbfsdokan depends on an empty default
+	case keybase1.RuntimeGroup_WINDOWSLIKE:
+		return ""
+	default:
+		return filepath.Join(e.GetRuntimeDir(), "kbfs")
+	}
+}
+
 func (e *Env) GetMountDir() (string, error) {
 	return e.GetString(
 		func() string { return e.cmd.GetMountDir() },
 		func() string { return os.Getenv("KEYBASE_MOUNTDIR") },
 		func() string { return e.GetConfig().GetMountDir() },
-		func() string {
-			switch runtime.GOOS {
-			case "darwin":
-				volumes := "/Volumes"
-				user, err := user.Current()
-				if err != nil {
-					panic(fmt.Sprintf("Couldn't get current user: %+v", err))
-				}
-				var runmodeName string
-				switch e.GetRunMode() {
-				case DevelRunMode:
-					runmodeName = "KeybaseDevel"
-				case StagingRunMode:
-					runmodeName = "KeybaseStaging"
-				case ProductionRunMode:
-					runmodeName = "Keybase"
-				default:
-					panic("Invalid run mode")
-				}
-				return filepath.Join(volumes, fmt.Sprintf(
-					"%s (%s)", runmodeName, user.Username))
-			case "linux":
-				return filepath.Join(e.GetRuntimeDir(), "kbfs")
-			// kbfsdokan depends on an empty default
-			case "windows":
-				return ""
-			default:
-				return filepath.Join(e.GetRuntimeDir(), "kbfs")
-			}
-		},
+		e.GetMountDirDefault,
 	), nil
 }
 
@@ -301,27 +403,51 @@ func newEnv(cmd CommandLine, config ConfigReader, osname string, getLog LogGette
 	e := Env{cmd: cmd, config: config, Test: &TestParameters{}}
 
 	e.HomeFinder = NewHomeFinder("keybase",
-		func() string { return e.getHomeFromCmdOrConfig() },
+		e.getHomeFromTestOrCmd,
+		func() string { return e.GetConfig().GetHome() },
+		e.getMobileSharedHomeFromCmdOrConfig,
 		osname,
-		func() RunMode { return e.GetRunMode() },
-		getLog)
+		e.GetRunMode,
+		getLog,
+		os.Getenv)
 	return &e
 }
 
-func (e *Env) getHomeFromCmdOrConfig() string {
+func (e *Env) getHomeFromTestOrCmd() string {
 	return e.GetString(
 		func() string { return e.Test.Home },
-		func() string { return e.cmd.GetHome() },
-		func() string { return e.GetConfig().GetHome() },
+		func() string {
+			home := e.cmd.GetHome()
+			if home == "" {
+				return ""
+			}
+			absHome, err := filepath.Abs(home)
+			if err != nil {
+				return home
+			}
+			return absHome
+		},
 	)
 }
 
-func (e *Env) GetHome() string            { return e.HomeFinder.Home(false) }
-func (e *Env) GetConfigDir() string       { return e.HomeFinder.ConfigDir() }
-func (e *Env) GetCacheDir() string        { return e.HomeFinder.CacheDir() }
-func (e *Env) GetSandboxCacheDir() string { return e.HomeFinder.SandboxCacheDir() }
-func (e *Env) GetDataDir() string         { return e.HomeFinder.DataDir() }
-func (e *Env) GetLogDir() string          { return e.HomeFinder.LogDir() }
+func (e *Env) getMobileSharedHomeFromCmdOrConfig() string {
+	return e.GetString(
+		func() string { return e.Test.MobileSharedHome },
+		func() string { return e.cmd.GetMobileSharedHome() },
+		func() string { return e.GetConfig().GetMobileSharedHome() },
+	)
+}
+
+func (e *Env) GetDownloadsDir() string     { return e.HomeFinder.DownloadsDir() }
+func (e *Env) GetHome() string             { return e.HomeFinder.Home(false) }
+func (e *Env) GetMobileSharedHome() string { return e.HomeFinder.MobileSharedHome(false) }
+func (e *Env) GetConfigDir() string        { return e.HomeFinder.ConfigDir() }
+func (e *Env) GetCacheDir() string         { return e.HomeFinder.CacheDir() }
+func (e *Env) GetSharedCacheDir() string   { return e.HomeFinder.SharedCacheDir() }
+func (e *Env) GetSandboxCacheDir() string  { return e.HomeFinder.SandboxCacheDir() }
+func (e *Env) GetDataDir() string          { return e.HomeFinder.DataDir() }
+func (e *Env) GetSharedDataDir() string    { return e.HomeFinder.SharedDataDir() }
+func (e *Env) GetLogDir() string           { return e.HomeFinder.LogDir() }
 
 func (e *Env) SendSystemChatMessages() bool {
 	return !e.Test.SkipSendingSystemChatMessages
@@ -400,15 +526,6 @@ func (e *Env) GetString(flist ...(func() string)) string {
 	return ret
 }
 
-func (e *Env) getPGPFingerprint(flist ...(func() *PGPFingerprint)) *PGPFingerprint {
-	for _, f := range flist {
-		if ret := f(); ret != nil {
-			return ret
-		}
-	}
-	return nil
-}
-
 func (e *Env) GetBool(def bool, flist ...func() (bool, bool)) bool {
 	for _, f := range flist {
 		if val, isSet := f(); isSet {
@@ -452,24 +569,124 @@ func (e *Env) GetDuration(def time.Duration, flist ...func() (time.Duration, boo
 	return def
 }
 
-func (e *Env) GetServerURI() string {
+func (e *Env) GetServerURI() (string, error) {
 	// appveyor and os x travis CI set server URI, so need to
 	// check for test flag here in order for production api endpoint
 	// tests to pass.
 	if e.Test.UseProductionRunMode {
-		return ServerLookup[e.GetRunMode()]
+		server, e := ServerLookup(e, e.GetRunMode())
+		if e != nil {
+			return "", nil
+		}
+		return server, nil
 	}
 
-	return e.GetString(
-		func() string { return e.cmd.GetServerURI() },
+	serverURI := e.GetString(
+		func() string {
+			serverURI, err := e.cmd.GetServerURI()
+			if err != nil {
+				return ""
+			}
+			return serverURI
+		},
 		func() string { return os.Getenv("KEYBASE_SERVER_URI") },
-		func() string { return e.GetConfig().GetServerURI() },
-		func() string { return ServerLookup[e.GetRunMode()] },
+		func() string {
+			serverURI, err := e.GetConfig().GetServerURI()
+			if err != nil {
+				return ""
+			}
+			return serverURI
+		},
+		func() string {
+			serverURI, err := ServerLookup(e, e.GetRunMode())
+			if err != nil {
+				return ""
+			}
+			return serverURI
+		},
 	)
+
+	if serverURI == "" {
+		return "", fmt.Errorf("Env failed to read a server URI from any source!")
+	}
+	return serverURI, nil
+}
+
+func (e *Env) GetUseRootConfigFile() bool {
+	return e.GetBool(false, e.cmd.GetUseRootConfigFile)
+}
+
+func (e *Env) GetRootRedirectorMount() (string, error) {
+	switch RuntimeGroup() {
+	case keybase1.RuntimeGroup_LINUXLIKE, keybase1.RuntimeGroup_DARWINLIKE:
+		return "/keybase", nil
+	default:
+		return "", fmt.Errorf("Root redirector mount unknown on this system.")
+	}
+}
+
+func (e *Env) GetRootConfigDirectory() (string, error) {
+	// NOTE: If this ever changes to more than one level deep, the configure
+	// redirector CLI command needs to be updated to update the permissions
+	// back to 0644 for all the created directories, or other processes won't
+	// be able to read them.
+	// Alternatively, we could package a blank config.json in that directory,
+	// but we can't rely on that for other packages.
+	switch RuntimeGroup() {
+	case keybase1.RuntimeGroup_LINUXLIKE:
+		return "/etc/keybase/", nil
+	default:
+		return "", fmt.Errorf("Root config directory unknown on this system")
+	}
+}
+
+func (e *Env) GetRootConfigFilename() (string, error) {
+	dir, err := e.GetRootConfigDirectory()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+func (e *Env) GetEnvFileDir() (string, error) {
+	switch RuntimeGroup() {
+	case keybase1.RuntimeGroup_LINUXLIKE:
+		// Do not respect $XDG_CONFIG_HOME due to debian systemd 229 not supporting %E
+		// see keybase.service systemd unit
+		return filepath.Join(e.GetHome(), ".config", "keybase"), nil
+	default:
+		return "", fmt.Errorf("No envfiledir for %s.", runtime.GOOS)
+	}
+}
+
+func (e *Env) GetEnvfileName() (string, error) {
+	dir, err := e.GetEnvFileDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "keybase.autogen.env"), nil
+}
+
+func (e *Env) GetOverrideEnvfileName() (string, error) {
+	dir, err := e.GetEnvFileDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "keybase.env"), nil
 }
 
 func (e *Env) GetConfigFilename() string {
 	return e.GetString(
+		func() string {
+			if e.GetUseRootConfigFile() {
+				ret, err := e.GetRootConfigFilename()
+				if err != nil {
+					return ""
+				}
+				return ret
+			}
+			return ""
+		},
 		func() string { return e.Test.ConfigFilename },
 		func() string { return e.cmd.GetConfigFilename() },
 		func() string { return os.Getenv("KEYBASE_CONFIG_FILE") },
@@ -480,10 +697,48 @@ func (e *Env) GetConfigFilename() string {
 
 func (e *Env) GetUpdaterConfigFilename() string {
 	return e.GetString(
+		func() string {
+			if e.GetUseRootConfigFile() {
+				dir, err := e.GetRootConfigDirectory()
+				if err != nil {
+					return ""
+				}
+				return filepath.Join(dir, UpdaterConfigFile)
+			}
+			return ""
+		},
 		func() string { return e.cmd.GetUpdaterConfigFilename() },
 		func() string { return os.Getenv("KEYBASE_UPDATER_CONFIG_FILE") },
 		func() string { return e.GetConfig().GetUpdaterConfigFilename() },
 		func() string { return filepath.Join(e.GetConfigDir(), UpdaterConfigFile) },
+	)
+}
+
+func (e *Env) GetGUIConfigFilename() string {
+	return e.GetString(
+		func() string {
+			if e.GetUseRootConfigFile() {
+				dir, err := e.GetRootConfigDirectory()
+				if err != nil {
+					return ""
+				}
+				return filepath.Join(dir, GUIConfigFile)
+			}
+			return ""
+		},
+		func() string { return e.cmd.GetGUIConfigFilename() },
+		func() string { return os.Getenv("KEYBASE_GUI_CONFIG_FILE") },
+		func() string { return e.GetConfig().GetGUIConfigFilename() },
+		func() string { return filepath.Join(e.GetConfigDir(), GUIConfigFile) },
+	)
+}
+
+func (e *Env) GetDeviceCloneStateFilename() string {
+	return e.GetString(
+		func() string { return e.cmd.GetDeviceCloneStateFilename() },
+		func() string { return os.Getenv("KEYBASE_DEVICE_CLONE_STATE_FILE") },
+		func() string { return e.GetConfig().GetDeviceCloneStateFilename() },
+		func() string { return filepath.Join(e.GetConfigDir(), DeviceCloneStateFile) },
 	)
 }
 
@@ -505,6 +760,15 @@ func (e *Env) GetDbFilename() string {
 	)
 }
 
+func (e *Env) GetChatOutboxStorageEngine() string {
+	return e.GetString(
+		func() string { return e.cmd.GetChatOutboxStorageEngine() },
+		func() string { return os.Getenv("KEYBASE_CHAT_OUTBOXSTORAGEENGINE") },
+		func() string { return e.GetConfig().GetChatOutboxStorageEngine() },
+		func() string { return "" },
+	)
+}
+
 func (e *Env) GetChatDbFilename() string {
 	return e.GetString(
 		func() string { return e.cmd.GetChatDbFilename() },
@@ -522,6 +786,43 @@ func (e *Env) GetPvlKitFilename() string {
 		func() string { return os.Getenv("KEYBASE_PVL_KIT_FILE") },
 		func() string { return e.GetConfig().GetPvlKitFilename() },
 	)
+}
+
+// GetParamProofKitFilename gets the path to param proof kit file.  Its value
+// is usually "" which means to use the server.
+func (e *Env) GetParamProofKitFilename() string {
+	return e.GetString(
+		func() string { return e.cmd.GetParamProofKitFilename() },
+		func() string { return os.Getenv("KEYBASE_PARAM_PROOF_KIT_FILE") },
+		func() string { return e.GetConfig().GetParamProofKitFilename() },
+	)
+}
+
+// GetExternalURLKitFilename gets the path to param proof kit file. Its value
+// is usually "" which means to use the server.
+func (e *Env) GetExternalURLKitFilename() string {
+	return e.GetString(
+		func() string { return e.cmd.GetExternalURLKitFilename() },
+		func() string { return os.Getenv("KEYBASE_EXTERNAL_URL_KIT_FILE") },
+		func() string { return e.GetConfig().GetExternalURLKitFilename() },
+	)
+}
+
+// GetProveBypass ignores creation_disabled so that the client will let the user
+// try to make a proof for any known service.
+func (e *Env) GetProveBypass() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.cmd.GetProveBypass() },
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_PROVE_BYPASS") },
+		func() (bool, bool) { return e.GetConfig().GetProveBypass() })
+}
+
+// GetDebugJourneycard enables experimental chat journey cards.
+func (e *Env) GetDebugJourneycard() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.cmd.GetDebugJourneycard() },
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DEBUG_JOURNEYCARD") },
+		func() (bool, bool) { return e.GetConfig().GetDebugJourneycard() })
 }
 
 func (e *Env) GetDebug() bool {
@@ -618,8 +919,8 @@ func (e *Env) GetUsername() NormalizedUsername {
 
 func (e *Env) GetSocketBindFile() (string, error) {
 	return e.GetString(
-		func() string { return e.sandboxSocketFile() },
-		func() string { return e.defaultSocketFile() },
+		e.sandboxSocketFile,
+		e.defaultSocketFile,
 	), nil
 }
 
@@ -675,9 +976,16 @@ func (e *Env) GetGregorSaveInterval() time.Duration {
 
 func (e *Env) GetGregorDisabled() bool {
 	return e.GetBool(false,
+		func() (bool, bool) { return e.Test.GetNoGregor() },
 		func() (bool, bool) { return e.cmd.GetGregorDisabled() },
 		func() (bool, bool) { return getEnvBool("KEYBASE_PUSH_DISABLED") },
 		func() (bool, bool) { return e.GetConfig().GetGregorDisabled() },
+	)
+}
+
+func (e *Env) GetSecretStorePrimingDisabled() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.Test.GetSecretStorePrimingDisabled() },
 	)
 }
 
@@ -713,6 +1021,96 @@ func (e *Env) GetChatDelivererInterval() time.Duration {
 	)
 }
 
+func (e *Env) GetAttachmentHTTPStartPort() int {
+	return e.GetInt(16423,
+		e.cmd.GetAttachmentHTTPStartPort,
+		func() (int, bool) { return e.getEnvInt("KEYBASE_ATTACHMENT_HTTP_START") },
+		e.GetConfig().GetAttachmentHTTPStartPort,
+	)
+}
+
+func (e *Env) GetAttachmentDisableMulti() bool {
+	return e.GetBool(false,
+		e.cmd.GetAttachmentDisableMulti,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_ATTACHMENT_DISABLE_MULTI") },
+		e.GetConfig().GetAttachmentDisableMulti,
+	)
+}
+
+func (e *Env) GetDisableTeamAuditor() bool {
+	return e.GetBool(false,
+		e.cmd.GetDisableTeamAuditor,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DISABLE_TEAM_AUDITOR") },
+		e.GetConfig().GetDisableTeamAuditor,
+		// If unset, use the BotLite setting
+		func() (bool, bool) { return e.GetEnableBotLiteMode(), true },
+	)
+}
+
+func (e *Env) GetDisableTeamBoxAuditor() bool {
+	return e.GetBool(false,
+		e.cmd.GetDisableTeamBoxAuditor,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DISABLE_TEAM_BOX_AUDITOR") },
+		e.GetConfig().GetDisableTeamBoxAuditor,
+		// If unset, use the BotLite setting
+		func() (bool, bool) { return e.GetEnableBotLiteMode(), true },
+	)
+}
+
+func (e *Env) GetDisableEKBackgroundKeygen() bool {
+	return e.GetBool(false,
+		e.cmd.GetDisableEKBackgroundKeygen,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DISABLE_EK_BACKGROUND_KEYGEN") },
+		e.GetConfig().GetDisableEKBackgroundKeygen,
+	)
+}
+
+func (e *Env) GetDisableMerkleAuditor() bool {
+	return e.GetBool(false,
+		e.cmd.GetDisableMerkleAuditor,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DISABLE_MERKLE_AUDITOR") },
+		e.GetConfig().GetDisableMerkleAuditor,
+		// If unset, use the BotLite setting
+		func() (bool, bool) { return e.GetEnableBotLiteMode(), true },
+	)
+}
+
+func (e *Env) GetDisableSearchIndexer() bool {
+	return e.GetBool(false,
+		e.cmd.GetDisableSearchIndexer,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DISABLE_SEARCH_INDEXER") },
+		e.GetConfig().GetDisableSearchIndexer,
+		// If unset, use the BotLite setting
+		func() (bool, bool) { return e.GetEnableBotLiteMode(), true },
+	)
+}
+
+func (e *Env) GetDisableBgConvLoader() bool {
+	return e.GetBool(false,
+		e.cmd.GetDisableBgConvLoader,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_DISABLE_BG_CONV_LOADER") },
+		e.GetConfig().GetDisableBgConvLoader,
+		// If unset, use the BotLite setting
+		func() (bool, bool) { return e.GetEnableBotLiteMode(), true },
+	)
+}
+
+func (e *Env) GetEnableBotLiteMode() bool {
+	return e.GetBool(false,
+		e.cmd.GetEnableBotLiteMode,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_ENABLE_BOT_LITE_MODE") },
+		e.GetConfig().GetEnableBotLiteMode,
+	)
+}
+
+func (e *Env) GetExtraNetLogging() bool {
+	return e.GetBool(false,
+		e.cmd.GetExtraNetLogging,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_EXTRA_NET_LOGGING") },
+		e.GetConfig().GetExtraNetLogging,
+	)
+}
+
 func (e *Env) GetPidFile() (ret string, err error) {
 	ret = e.GetString(
 		func() string { return e.cmd.GetPidFile() },
@@ -731,14 +1129,15 @@ func (e *Env) GetEmail() string {
 	)
 }
 
+func (e *Env) GetStayLoggedOut() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.GetConfig().GetStayLoggedOut() },
+	)
+}
+
 // Upgrade sigchains to contain per-user-keys.
 func (e *Env) GetUpgradePerUserKey() bool {
 	return !e.Test.DisableUpgradePerUserKey
-}
-
-// Automatically create a wallet for the logged-in user.
-func (e *Env) GetAutoWallet() bool {
-	return !e.Test.DisableAutoWallet
 }
 
 // If true, do not logout after user.key_change notification handler
@@ -747,13 +1146,63 @@ func (e *Env) GetSkipLogoutIfRevokedCheck() bool {
 	return e.Test.SkipLogoutIfRevokedCheck
 }
 
+// Get the ProxyType based off of the configured proxy and tor settings
+func (e *Env) GetProxyType() ProxyType {
+	if e.GetTorMode() != TorNone {
+		// Tor mode is enabled. Tor mode is implemented via a socks proxy
+		return Socks
+	}
+	var proxyTypeStr = e.GetString(
+		func() string { return e.cmd.GetProxyType() },
+		func() string { return os.Getenv("PROXY_TYPE") },
+		func() string { return e.GetConfig().GetProxyType() },
+	)
+	return ProxyTypeStrToEnumFunc(proxyTypeStr)
+}
+
+func ProxyTypeStrToEnumFunc(proxyTypeStr string) ProxyType {
+	proxyType, ok := ProxyTypeStrToEnum[strings.ToLower(proxyTypeStr)]
+	if ok {
+		return proxyType
+	}
+	// If they give us a bogus proxy type we just don't enable a proxy
+	return NoProxy
+}
+
+// Get the address (optionally including a port) of the currently configured proxy. Returns an empty string if no proxy
+// is configured.
 func (e *Env) GetProxy() string {
 	return e.GetString(
+		func() string {
+			// Only return the tor proxy address if tor mode is enabled to ensure we fall through to the other options
+			if e.GetTorMode() != TorNone {
+				return e.GetTorProxy()
+			}
+			return ""
+		},
+		// Prioritze tor mode over configured proxies
 		func() string { return e.cmd.GetProxy() },
-		func() string { return os.Getenv("https_proxy") },
-		func() string { return os.Getenv("http_proxy") },
 		func() string { return e.GetConfig().GetProxy() },
+		func() string { return os.Getenv("PROXY") },
+		// Prioritize the keybase specific methods of configuring a proxy above the standard unix env variables
+		func() string { return os.Getenv("HTTPS_PROXY") },
+		func() string { return os.Getenv("HTTP_PROXY") },
 	)
+}
+
+func (e *Env) IsCertPinningEnabled() bool {
+	// SSL Pinning is enabled if none of the config options say it is disabled
+	if !e.cmd.IsCertPinningEnabled() {
+		return false
+	}
+	res, isSet := e.getEnvBool("DISABLE_SSL_PINNING")
+	if isSet && res {
+		return false
+	}
+	if !e.GetConfig().IsCertPinningEnabled() {
+		return false
+	}
+	return true
 }
 
 func (e *Env) GetGpgHome() string {
@@ -960,11 +1409,27 @@ func (e *Env) GetAppType() AppType {
 	}
 }
 
+func (e *Env) IsMobileExtension() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.cmd.IsMobileExtension() },
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_MOBILE_EXTENSION") },
+		func() (bool, bool) { return e.GetConfig().IsMobileExtension() },
+	)
+}
+
 func (e *Env) GetSlowGregorConn() bool {
 	return e.GetBool(false,
 		func() (bool, bool) { return e.cmd.GetSlowGregorConn() },
 		func() (bool, bool) { return e.getEnvBool("KEYBASE_SLOW_GREGOR_CONN") },
 		func() (bool, bool) { return e.GetConfig().GetSlowGregorConn() },
+	)
+}
+
+func (e *Env) GetReadDeletedSigChain() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.cmd.GetReadDeletedSigChain() },
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_READ_DELETED_SIGCHAIN") },
+		func() (bool, bool) { return e.GetConfig().GetReadDeletedSigChain() },
 	)
 }
 
@@ -974,6 +1439,9 @@ func (e *Env) GetFeatureFlags() FeatureFlags {
 		if ret.Empty() && err == nil {
 			ret = f
 		}
+	}
+	if e.Test.EnvironmentFeatureFlags != nil {
+		pick(e.Test.EnvironmentFeatureFlags, nil)
 	}
 	pick(e.cmd.GetFeatureFlags())
 	pick(StringToFeatureFlags(os.Getenv("KEYBASE_FEATURES")), nil)
@@ -1151,10 +1619,49 @@ func (e *Env) GetInstallID() (ret InstallID) {
 	return ret
 }
 
+func (e *Env) GetEffectiveLogFile() (filename string, ok bool) {
+	logFile := e.GetLogFile()
+	if logFile != "" {
+		return logFile, true
+	}
+
+	filePrefix := e.GetLogPrefix()
+	if filePrefix != "" {
+		filePrefix += time.Now().Format("20060102T150405.999999999Z0700")
+		logFile = filePrefix + ".log"
+		return logFile, true
+	}
+
+	return e.GetDefaultLogFile(), e.GetUseDefaultLogFile()
+}
+
 func (e *Env) GetLogFile() string {
 	return e.GetString(
 		func() string { return e.cmd.GetLogFile() },
 		func() string { return os.Getenv("KEYBASE_LOG_FILE") },
+	)
+}
+
+func (e *Env) GetEKLogFile() string {
+	return e.GetString(
+		func() string { return e.cmd.GetEKLogFile() },
+		func() string { return os.Getenv("KEYBASE_EK_LOG_FILE") },
+		func() string { return filepath.Join(e.GetLogDir(), EKLogFileName) },
+	)
+}
+
+func (e *Env) GetGUILogFile() string {
+	return e.GetString(
+		func() string { return e.cmd.GetGUILogFile() },
+		func() string { return os.Getenv("KEYBASE_GUI_LOG_FILE") },
+		func() string { return filepath.Join(e.GetLogDir(), GUILogFileName) },
+	)
+}
+
+func (e *Env) GetUseDefaultLogFile() bool {
+	return e.GetBool(false,
+		e.cmd.GetUseDefaultLogFile,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_USE_DEFAULT_LOG_FILE") },
 	)
 }
 
@@ -1212,7 +1719,7 @@ func (e *Env) GetStoredSecretAccessGroup() string {
 	return "99229SGT5K.group.keybase"
 }
 
-func (e *Env) GetStoredSecretServiceName() string {
+func (e *Env) GetStoredSecretServiceBaseName() string {
 	var serviceName string
 	switch e.GetRunMode() {
 	case DevelRunMode:
@@ -1227,15 +1734,30 @@ func (e *Env) GetStoredSecretServiceName() string {
 	if e.Test.Devel {
 		// Append DevelName so that tests won't clobber each
 		// other's keychain entries on shutdown.
-		serviceName += fmt.Sprintf("-test (%s)", e.Test.DevelName)
+		serviceName += "-test"
+	}
+	return serviceName
+}
+
+func (e *Env) GetStoredSecretServiceName() string {
+	serviceName := e.GetStoredSecretServiceBaseName()
+	if e.Test.Devel {
+		// Append DevelName so that tests won't clobber each
+		// other's keychain entries on shutdown.
+		serviceName += fmt.Sprintf("(%s)", e.Test.DevelName)
 	}
 	return serviceName
 }
 
 type AppConfig struct {
 	NullConfiguration
+	DownloadsDir                   string
 	HomeDir                        string
+	MobileSharedHomeDir            string
 	LogFile                        string
+	EKLogFile                      string
+	GUILogFile                     string
+	UseDefaultLogFile              bool
 	RunMode                        RunMode
 	Debug                          bool
 	LocalRPCDebug                  string
@@ -1243,12 +1765,36 @@ type AppConfig struct {
 	VDebugSetting                  string
 	SecurityAccessGroupOverride    bool
 	ChatInboxSourceLocalizeThreads int
+	MobileExtension                bool
+	AttachmentHTTPStartPort        int
+	AttachmentDisableMulti         bool
+	LinkCacheSize                  int
+	UPAKCacheSize                  int
+	PayloadCacheSize               int
+	ProofCacheSize                 int
+	OutboxStorageEngine            string
+	DisableTeamAuditor             bool
+	DisableMerkleAuditor           bool
+	DisableTeamBoxAuditor          bool
+	DisableEKBackgroundKeygen      bool
 }
 
 var _ CommandLine = AppConfig{}
 
 func (c AppConfig) GetLogFile() string {
 	return c.LogFile
+}
+
+func (c AppConfig) GetEKLogFile() string {
+	return c.EKLogFile
+}
+
+func (c AppConfig) GetGUILogFile() string {
+	return c.GUILogFile
+}
+
+func (c AppConfig) GetUseDefaultLogFile() (bool, bool) {
+	return c.UseDefaultLogFile, true
 }
 
 func (c AppConfig) GetDebug() (bool, bool) {
@@ -1263,12 +1809,20 @@ func (c AppConfig) GetRunMode() (RunMode, error) {
 	return c.RunMode, nil
 }
 
+func (c AppConfig) GetDownloadsDir() string {
+	return c.DownloadsDir
+}
+
 func (c AppConfig) GetHome() string {
 	return c.HomeDir
 }
 
-func (c AppConfig) GetServerURI() string {
-	return c.ServerURI
+func (c AppConfig) GetMobileSharedHome() string {
+	return c.MobileSharedHomeDir
+}
+
+func (c AppConfig) GetServerURI() (string, error) {
+	return c.ServerURI, nil
 }
 
 func (c AppConfig) GetSecurityAccessGroupOverride() (bool, bool) {
@@ -1279,7 +1833,15 @@ func (c AppConfig) GetAppType() AppType {
 	return MobileAppType
 }
 
+func (c AppConfig) IsMobileExtension() (bool, bool) {
+	return c.MobileExtension, true
+}
+
 func (c AppConfig) GetSlowGregorConn() (bool, bool) {
+	return false, false
+}
+
+func (c AppConfig) GetReadDeletedSigChain() (bool, bool) {
 	return false, false
 }
 
@@ -1291,15 +1853,72 @@ func (c AppConfig) GetChatInboxSourceLocalizeThreads() (int, bool) {
 	return c.ChatInboxSourceLocalizeThreads, true
 }
 
+func (c AppConfig) GetChatOutboxStorageEngine() string {
+	if len(c.OutboxStorageEngine) > 0 {
+		return c.OutboxStorageEngine
+	}
+	return ""
+}
+
 // Default is 500, compacted size of each file is 2MB, so turning
 // this down on mobile to reduce mem usage.
 func (c AppConfig) GetLevelDBNumFiles() (int, bool) {
 	return 50, true
 }
 
-// Default is 4000. Turning down on mobile to reduce memory usage.
+func (c AppConfig) GetAttachmentHTTPStartPort() (int, bool) {
+	if c.AttachmentHTTPStartPort != 0 {
+		return c.AttachmentHTTPStartPort, true
+	}
+	return 0, false
+}
+
 func (c AppConfig) GetLinkCacheSize() (int, bool) {
-	return 1000, true
+	if c.LinkCacheSize != 0 {
+		return c.LinkCacheSize, true
+	}
+	return 0, false
+}
+
+func (c AppConfig) GetUPAKCacheSize() (int, bool) {
+	if c.UPAKCacheSize != 0 {
+		return c.UPAKCacheSize, true
+	}
+	return 0, false
+}
+
+func (c AppConfig) GetPayloadCacheSize() (int, bool) {
+	if c.PayloadCacheSize != 0 {
+		return c.PayloadCacheSize, true
+	}
+	return 0, false
+}
+
+func (c AppConfig) GetProofCacheSize() (int, bool) {
+	if c.ProofCacheSize != 0 {
+		return c.ProofCacheSize, true
+	}
+	return 0, false
+}
+
+func (c AppConfig) GetDisableTeamAuditor() (bool, bool) {
+	return c.DisableTeamAuditor, true
+}
+
+func (c AppConfig) GetDisableMerkleAuditor() (bool, bool) {
+	return c.DisableMerkleAuditor, true
+}
+
+func (c AppConfig) GetDisableTeamBoxAuditor() (bool, bool) {
+	return c.DisableTeamBoxAuditor, true
+}
+
+func (c AppConfig) GetDisableEKBackgroundKeygen() (bool, bool) {
+	return c.DisableEKBackgroundKeygen, true
+}
+
+func (c AppConfig) GetAttachmentDisableMulti() (bool, bool) {
+	return c.AttachmentDisableMulti, true
 }
 
 func (e *Env) GetUpdatePreferenceAuto() (bool, bool) {
@@ -1376,20 +1995,34 @@ func (e *Env) RunningInCI() bool {
 }
 
 func (e *Env) WantsSystemd() bool {
-	return (e.GetRunMode() == ProductionRunMode &&
-		systemd.IsRunningSystemd() &&
+	return (e.GetRunMode() == ProductionRunMode && e.ModelessWantsSystemd())
+}
+
+func (e *Env) ModelessWantsSystemd() bool {
+	return (systemd.IsRunningSystemd() &&
 		os.Getenv("KEYBASE_SYSTEMD") != "0")
 }
 
-func (e *Env) DarwinForceSecretStoreFile() bool {
-	return (e.GetRunMode() == DevelRunMode &&
-		os.Getenv("KEYBASE_SECRET_STORE_FILE") == "1")
+func (e *Env) ForceSecretStoreFile() bool {
+	// By default use system-provided secret store (like MacOS Keychain), but
+	// allow users to fall back to file-based store for testing and debugging.
+	return e.GetBool(false,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_SECRET_STORE_FILE") },
+		func() (bool, bool) { return e.GetConfig().GetForceSecretStoreFile() },
+	)
 }
 
-func (e *Env) RememberPassphrase() bool {
+func (e *Env) GetRuntimeStatsEnabled() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_RUNTIME_STATS_ENABLED") },
+		func() (bool, bool) { return e.GetConfig().GetRuntimeStatsEnabled() },
+	)
+}
+
+func (e *Env) GetRememberPassphrase(username NormalizedUsername) bool {
 	return e.GetBool(true,
-		e.cmd.GetRememberPassphrase,
-		e.GetConfig().GetRememberPassphrase,
+		func() (bool, bool) { return e.cmd.GetRememberPassphrase(username) },
+		func() (bool, bool) { return e.GetConfig().GetRememberPassphrase(username) },
 	)
 }
 
@@ -1409,4 +2042,30 @@ func (e *Env) AllowPTrace() bool {
 	return e.GetBool(false,
 		func() (bool, bool) { return e.getEnvBool("KEYBASE_ALLOW_PTRACE") },
 	)
+}
+
+func (e *Env) GetLogFileConfig(filename string) *logger.LogFileConfig {
+	var maxKeepFiles int
+	var maxSize int64
+
+	if e.GetAppType() == MobileAppType && !e.GetFeatureFlags().Admin(e.GetUID()) {
+		maxKeepFiles = 2
+		maxSize = 16 * opt.MiB
+	} else {
+		maxKeepFiles = 3
+		maxSize = 128 * opt.MiB
+	}
+
+	return &logger.LogFileConfig{
+		Path:         filename,
+		MaxAge:       30 * 24 * time.Hour, // 30 days
+		MaxSize:      maxSize,
+		MaxKeepFiles: maxKeepFiles,
+	}
+}
+func (e *Env) GetForceLinuxKeyring() bool {
+	return e.GetBool(false,
+		func() (bool, bool) { return e.cmd.GetForceLinuxKeyring() },
+		func() (bool, bool) { return e.getEnvBool("KEYBASE_FORCE_LINUX_KEYRING") },
+		func() (bool, bool) { return e.GetConfig().GetForceLinuxKeyring() })
 }

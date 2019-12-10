@@ -1,16 +1,10 @@
 {
-  "prelude": ["import * as Constants from '../constants/unlock-folders'"],
+  "prelude": [],
   "actions": {
-    "checkPaperKey": {
-      "paperKey": "string"
-    },
+    "checkPaperKey": { "paperKey": "string" },
     "openPopup": {},
     "closePopup": {},
-    "checkPaperKeyDone": {
-      "canError": {
-        "error": "string"
-      }
-    },
+    "checkPaperKeyDone": { "error?": "string" },
     "closeDone": {},
     "finish": {},
     "newRekeyPopup": {
@@ -19,10 +13,6 @@
       "problemSet": "RPCTypes.ProblemSet"
     },
     "onBackFromPaperKey": {},
-    "registerRekeyListener": {},
-    "toPaperKeyInput": {},
-    "waiting": {
-      "waiting": "boolean"
-    }
+    "toPaperKeyInput": {}
   }
 }

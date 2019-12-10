@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSecretStoreMem(t *testing.T) {
@@ -17,50 +19,33 @@ func TestSecretStoreMem(t *testing.T) {
 	}
 
 	s := NewSecretStoreMem()
-	for name, test := range cases {
+	m := newNilMetaContext()
+	for _, test := range cases {
 		fs, err := newLKSecFullSecretFromBytes(test.secret)
-		if err != nil {
-			t.Fatalf("failed to make new full secret: %s", err)
-		}
-		if err := s.StoreSecret(test.username, fs); err != nil {
-			t.Fatalf("%s: %s", name, err)
-		}
-		secret, err := s.RetrieveSecret(test.username)
-		if err != nil {
-			t.Fatalf("%s: %s", name, err)
-		}
-		if !bytes.Equal(secret.Bytes(), test.secret) {
-			t.Errorf("%s: secret: %x, expected %x", name, secret, test.secret)
-		}
+		require.NoError(t, err)
+
+		err = s.StoreSecret(m, test.username, fs)
+		require.NoError(t, err)
+
+		secret, err := s.RetrieveSecret(m, test.username)
+		require.NoError(t, err)
+		require.True(t, bytes.Equal(secret.Bytes(), test.secret))
 	}
 
-	if _, err := s.RetrieveSecret("nobody"); err != ErrSecretForUserNotFound {
-		t.Fatalf("retrieve err: %s (%T), expected ErrSecretForUserNotFound", err, err)
-	}
+	_, err := s.RetrieveSecret(m, "nobody")
+	require.IsType(t, SecretStoreError{}, err)
 
-	users, err := s.GetUsersWithStoredSecrets()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(users) != 2 {
-		t.Fatalf("num users: %d, expected 2", len(users))
-	}
+	users, err := s.GetUsersWithStoredSecrets(m)
+	require.NoError(t, err)
+	require.Len(t, users, 2)
 	sort.Strings(users)
-	if users[0] != "alice" {
-		t.Errorf("user 0: %s, expected alice", users[0])
-	}
-	if users[1] != "charlie" {
-		t.Errorf("user 1: %s, expected charlie", users[1])
-	}
+	require.Equal(t, users[0], "alice")
+	require.Equal(t, users[1], "charlie")
 
-	if err := s.ClearSecret("alice"); err != nil {
-		t.Fatal(err)
-	}
-	secret, err := s.RetrieveSecret("alice")
-	if err != ErrSecretForUserNotFound {
-		t.Fatalf("err: %v, expected %v", err, ErrSecretForUserNotFound)
-	}
-	if !secret.IsNil() {
-		t.Errorf("secret: %+v, expected nil", secret)
-	}
+	err = s.ClearSecret(m, "alice")
+	require.NoError(t, err)
+
+	secret, err := s.RetrieveSecret(m, "alice")
+	require.IsType(t, SecretStoreError{}, err)
+	require.True(t, secret.IsNil())
 }

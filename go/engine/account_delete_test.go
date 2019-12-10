@@ -13,7 +13,6 @@ import (
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/context"
 )
 
 func TestAccountDelete(t *testing.T) {
@@ -30,7 +29,7 @@ func TestAccountDelete(t *testing.T) {
 	err := RunEngine2(m, eng)
 	require.NoError(t, err)
 
-	_, res, err := tc.G.Resolver.ResolveUser(context.TODO(), fu.Username)
+	_, res, err := tc.G.Resolver.ResolveUser(m, fu.Username)
 	require.NoError(t, err)
 
 	err = res.GetError()
@@ -67,7 +66,7 @@ func TestAccountDeleteBadPassphrase(t *testing.T) {
 	err := RunEngine2(m, eng)
 	require.Error(t, err)
 
-	_, res, err := tc.G.Resolver.ResolveUser(context.TODO(), fu.Username)
+	_, res, err := tc.G.Resolver.ResolveUser(m, fu.Username)
 	require.NoError(t, err)
 	err = res.GetError()
 	require.NoError(t, err)
@@ -85,6 +84,7 @@ func TestAccountDeleteIdentify(t *testing.T) {
 	fu := CreateAndSignupFakeUser(tc, "acct")
 	u, err := libkb.LoadUser(libkb.NewLoadUserByNameArg(tc.G, fu.Username))
 	require.NoError(t, err)
+	t.Logf("created user %v %v", u.GetNormalizedName(), u.GetUID())
 
 	uis := libkb.UIs{
 		SecretUI: &libkb.TestSecretUI{Passphrase: fu.Passphrase},
@@ -93,9 +93,16 @@ func TestAccountDeleteIdentify(t *testing.T) {
 	eng := NewAccountDelete(tc.G)
 	err = RunEngine2(m, eng)
 	require.NoError(t, err)
+	t.Logf("deleted user")
+
+	// Punch through the UPAK cache. Not dealing with upak vs delete race right now.
+	_, _, err = tc.G.GetUPAKLoader().LoadV2(
+		libkb.NewLoadUserArgWithMetaContext(libkb.NewMetaContextForTest(tc)).WithPublicKeyOptional().
+			WithUID(u.GetUID()).WithForcePoll(true))
+	require.NoError(t, err)
 
 	i := newIdentify2WithUIDTester(tc.G)
-	tc.G.Services = i
+	tc.G.SetProofServices(i)
 	arg := &keybase1.Identify2Arg{
 		Uid:              u.GetUID(),
 		IdentifyBehavior: keybase1.TLFIdentifyBehavior_CLI,
@@ -103,6 +110,7 @@ func TestAccountDeleteIdentify(t *testing.T) {
 	ieng := NewIdentify2WithUID(tc.G, arg)
 	uis = libkb.UIs{IdentifyUI: i}
 	m = NewMetaContextForTest(tc).WithUIs(uis)
+	t.Logf("identifying...")
 	err = RunEngine2(m, ieng)
 	require.Error(t, err)
 
@@ -130,7 +138,7 @@ func TestAccountDeleteAfterRestart(t *testing.T) {
 	if err == nil {
 		t.Fatal("no error loading deleted user")
 	}
-	if _, ok := err.(libkb.DeletedError); !ok {
+	if _, ok := err.(libkb.UserDeletedError); !ok {
 		t.Errorf("loading deleted user error type: %T, expected libkb.DeletedError", err)
 	}
 }

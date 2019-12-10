@@ -1,42 +1,41 @@
 package avatars
 
 import (
-	"context"
+	"fmt"
 	"time"
 
+	"github.com/keybase/client/go/kbhttp/manager"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/keybase1"
 )
 
-type Source interface {
-	LoadUsers(context.Context, []string, []keybase1.AvatarFormat) (keybase1.LoadAvatarsRes, error)
-	LoadTeams(context.Context, []string, []keybase1.AvatarFormat) (keybase1.LoadAvatarsRes, error)
-
-	ClearCacheForName(context.Context, string, []keybase1.AvatarFormat) error
-
-	StartBackgroundTasks()
-	StopBackgroundTasks()
-}
-
-func CreateSourceFromEnv(g *libkb.GlobalContext) (s Source) {
+func CreateSourceFromEnvAndInstall(g *libkb.GlobalContext) {
+	var s libkb.AvatarLoaderSource
 	typ := g.Env.GetAvatarSource()
 	switch typ {
 	case "simple":
-		s = NewSimpleSource(g)
+		s = NewSimpleSource()
 	case "url":
-		s = NewURLCachingSource(g, time.Hour /* staleThreshold */, 20000)
+		s = NewURLCachingSource(time.Hour /* staleThreshold */, 20000)
 	case "full":
 		maxSize := 10000
-		if g.GetAppType() == libkb.MobileAppType {
+		if g.IsMobileAppType() {
 			maxSize = 2000
 		}
 		// When changing staleThreshold here, serverside avatar change
 		// notification dismiss time should be adjusted as well.
-		s = NewFullCachingSource(g, time.Hour /* staleThreshold */, maxSize)
+		s = NewFullCachingSource(time.Hour /* staleThreshold */, maxSize)
 	}
-	s.StartBackgroundTasks()
-	g.PushShutdownHook(func() error {
-		s.StopBackgroundTasks()
+	g.AddDbNukeHook(s, fmt.Sprintf("AvatarLoader[%s]", typ))
+	g.SetAvatarLoader(s)
+}
+
+func ServiceInit(g *libkb.GlobalContext, httpSrv *manager.Srv, source libkb.AvatarLoaderSource) *Srv {
+	m := libkb.NewMetaContextBackground(g)
+	source.StartBackgroundTasks(m)
+	s := NewSrv(g, httpSrv, source) // start the http srv up
+	g.PushShutdownHook(func(mctx libkb.MetaContext) error {
+		source.StopBackgroundTasks(mctx)
 		return nil
 	})
 	return s

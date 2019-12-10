@@ -1,59 +1,56 @@
 {
-  "prelude": ["import HiddenString from '../util/hidden-string'"],
+  "prelude": [
+    "import HiddenString from '../util/hidden-string'",
+    "import {RPCError} from '../util/errors'"
+  ],
   "actions": {
-    "checkInviteCode": {
+    "goBackAndClearErrors": {},
+    "requestAutoInvite": {},
+    "requestedAutoInvite": {
+      "inviteCode?": "string",
+      "error?": "boolean"
+    },
+    "checkInviteCode": {"inviteCode": "string"},
+    "checkedInviteCode": {
       "inviteCode": "string",
-      "canError": {
-        "errorText": "string"
-      }
+      "error?": "string"
     },
-    "checkPassphrase": {
-      "passphrase": "HiddenString",
-      "canError": {
-        "passphraseError": "HiddenString"
-      }
+    "checkPassword": {
+      "pass1": "HiddenString",
+      "pass2": "HiddenString"
     },
-    "checkUsernameEmail": {
+    "checkUsername": {
+      "username": "string"
+    },
+    "checkedUsername": {
       "username": "string",
-      "email": "string",
-      "canError": {
-        "emailError": "?Error",
-        "usernameError": "?Error",
-        "email": "?string",
-        "username": "?string"
-      }
+      "usernameTaken?": "string",
+      "error": "string"
     },
-    "clearDeviceNameError": {},
     "requestInvite": {
       "email": "string",
+      "name": "string"
+    },
+    "requestedInvite": {
+      "email": "string",
       "name": "string",
-      "canError": {
-        "emailError": "?Error",
-        "nameError": "?Error",
-        "email": "?string",
-        "name": "?string"
-      }
+      "emailError?": "string",
+      "nameError?": "string",
     },
-    "resetSignup": {},
     "restartSignup": {},
-    "setDeviceNameError": {
-      "deviceNameError": "string"
+    "signedup": {
+      "error?": "RPCError"
     },
-    "showPaperKey": {
-      "paperkey": "HiddenString"
+    "checkDevicename": {
+      "devicename": "string"
     },
-    "signupError": {
-      "signupError": "HiddenString"
+    "checkedDevicename": {
+      "devicename": "string",
+      "error?": "string"
     },
-    "waiting": {
-      "waiting": "boolean"
+    "setJustSignedUpEmail": {
+      "email": "string"
     },
-    "startRequestInvite": {},
-    "submitDeviceName": {
-      "deviceName": "string",
-      "canError": {
-        "deviceNameError": "string"
-      }
-    }
+    "clearJustSignedUpEmail": {},
   }
 }

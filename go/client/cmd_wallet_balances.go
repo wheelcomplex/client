@@ -8,13 +8,14 @@ import (
 	"github.com/keybase/client/go/libcmdline"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/stellar1"
+	"github.com/keybase/client/go/stellar"
 	"github.com/keybase/stellarnet"
 	"golang.org/x/net/context"
 )
 
 type cmdWalletBalances struct {
 	libkb.Contextified
-	address string
+	accountID string
 }
 
 func newCmdWalletBalances(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cli.Command {
@@ -34,16 +35,36 @@ func newCmdWalletBalances(cl *libcmdline.CommandLine, g *libkb.GlobalContext) cl
 
 func (c *cmdWalletBalances) ParseArgv(ctx *cli.Context) error {
 	if len(ctx.Args()) > 1 {
-		return errors.New("one wallet address required, multiple found")
+		return errors.New("one Stellar address required, multiple found")
 	} else if len(ctx.Args()) == 1 {
-		c.address = ctx.Args()[0]
+		c.accountID = ctx.Args()[0]
 	}
-
 	return nil
 }
 
+func (c *cmdWalletBalances) printBalance(dui libkb.DumbOutputUI, balance stellar1.Balance, xchgRate *stellar1.OutsideExchangeRate) {
+	localAmountStr := ""
+	if balance.Asset.IsNativeXLM() {
+		if xchgRate != nil {
+			localAmount, err := stellarnet.ConvertXLMToOutside(balance.Amount, xchgRate.Rate)
+			if err == nil {
+				localAmountStr = fmt.Sprintf(" (%s %s)", string(xchgRate.Currency), localAmount)
+			} else {
+				c.G().Log.Warning("Unable to convert to local currency: %s", err)
+			}
+		}
+
+		_, _ = dui.PrintfUnescaped("XLM\t%s%s\n", balance.Amount, ColorString(c.G(), "green", localAmountStr))
+	} else {
+		_, _ = dui.Printf("%s\t%s\t(issued by: %s, %s)\n", balance.Asset.Code, balance.Amount, stellar.FormatAssetIssuerString(balance.Asset), balance.Asset.Issuer)
+	}
+}
+
 func (c *cmdWalletBalances) runForAccountID(cli stellar1.LocalClient) error {
-	accountID := stellar1.AccountID(c.address)
+	accountID, err := libkb.ParseStellarAccountID(c.accountID)
+	if err != nil {
+		return err
+	}
 
 	dui := c.G().UI.GetDumbOutputUI()
 	balances, err := cli.BalancesLocal(context.Background(), accountID)
@@ -51,12 +72,24 @@ func (c *cmdWalletBalances) runForAccountID(cli stellar1.LocalClient) error {
 		return err
 	}
 
-	for _, balance := range balances {
-		if balance.Asset.IsNativeXLM() {
-			dui.Printf("%s\t%s\n", "XLM", balance.Amount)
+	var xchgRate *stellar1.OutsideExchangeRate
+	accountCurrency, err := cli.GetDisplayCurrencyLocal(context.Background(), stellar1.GetDisplayCurrencyLocalArg{
+		AccountID: &accountID,
+	})
+	if err == nil {
+		// Ignore error - GetDisplayCurrencyLocal will error out if we don't
+		// own the account. In that case we just skip currency conversion but
+		// still display balances.
+		rate, err := cli.ExchangeRateLocal(context.Background(), accountCurrency.Code)
+		if err != nil {
+			c.G().Log.Warning("Unable to get exchange rate for %q: %s", accountCurrency.Code, err)
 		} else {
-			dui.Printf("%q\t%s\t(issued by %s)\n", balance.Asset.Code, balance.Amount, balance.Asset.Issuer)
+			xchgRate = &rate
 		}
+	}
+
+	for _, balance := range balances {
+		c.printBalance(dui, balance, xchgRate)
 	}
 	return nil
 }
@@ -73,9 +106,9 @@ func (c *cmdWalletBalances) runForUser(cli stellar1.LocalClient) error {
 		if acc.Name != "" {
 			var isPrimary string
 			if acc.IsPrimary {
-				isPrimary = ", primary"
+				isPrimary = " (Primary)"
 			}
-			accountName = fmt.Sprintf("%s (%s%s)", acc.Name, acc.AccountID.String(), isPrimary)
+			accountName = fmt.Sprintf("'%s' (%s)%s", acc.Name, acc.AccountID, isPrimary)
 		} else {
 			accountName = acc.AccountID.String()
 			if acc.IsPrimary {
@@ -94,21 +127,7 @@ func (c *cmdWalletBalances) runForUser(cli stellar1.LocalClient) error {
 			}}
 		}
 		for _, balance := range acc.Balance {
-			localAmountStr := ""
-			if balance.Asset.IsNativeXLM() {
-				if acc.ExchangeRate != nil {
-					localAmount, err := stellarnet.ConvertXLMToOutside(balance.Amount, acc.ExchangeRate.Rate)
-					if err == nil {
-						localAmountStr = fmt.Sprintf(" (%s %s)", string(acc.ExchangeRate.Currency), localAmount)
-					} else {
-						c.G().Log.Warning("Unable to convert to local currency: %s", err)
-					}
-				}
-
-				dui.PrintfUnescaped("XLM\t%s%s\n", balance.Amount, ColorString(c.G(), "green", localAmountStr))
-			} else {
-				dui.Printf("%q\t%s\t(issued by %s)\n", balance.Asset.Code, balance.Amount, balance.Asset.Issuer)
-			}
+			c.printBalance(dui, balance, acc.ExchangeRate)
 		}
 
 		if i != len(accounts)-1 {
@@ -118,13 +137,14 @@ func (c *cmdWalletBalances) runForUser(cli stellar1.LocalClient) error {
 	return nil
 }
 
-func (c *cmdWalletBalances) Run() error {
+func (c *cmdWalletBalances) Run() (err error) {
+	defer transformStellarCLIError(&err)
 	cli, err := GetWalletClient(c.G())
 	if err != nil {
 		return err
 	}
 
-	if c.address == "" {
+	if c.accountID == "" {
 		return c.runForUser(cli)
 	}
 	return c.runForAccountID(cli)

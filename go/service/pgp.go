@@ -36,8 +36,9 @@ func (u *RemotePgpUI) KeyGenerated(ctx context.Context, arg keybase1.KeyGenerate
 	return u.cli.KeyGenerated(ctx, arg)
 }
 
-func (u *RemotePgpUI) ShouldPushPrivate(ctx context.Context, sessionID int) (bool, error) {
-	return u.cli.ShouldPushPrivate(ctx, u.sessionID)
+func (u *RemotePgpUI) ShouldPushPrivate(ctx context.Context, arg keybase1.ShouldPushPrivateArg) (bool, error) {
+	arg.SessionID = u.sessionID
+	return u.cli.ShouldPushPrivate(ctx, arg)
 }
 
 func (u *RemotePgpUI) Finished(ctx context.Context, sessionID int) error {
@@ -317,4 +318,28 @@ func (h *PGPHandler) PGPStorageDismiss(ctx context.Context, sessionID int) error
 
 	key := libkb.DbKeyNotificationDismiss(libkb.NotificationDismissPGPPrefix, username)
 	return h.G().LocalDb.PutRaw(key, []byte(libkb.NotificationDismissPGPValue))
+}
+
+func (h *PGPHandler) PGPPushPrivate(ctx context.Context, arg keybase1.PGPPushPrivateArg) error {
+	uis := libkb.UIs{
+		LogUI:     h.getLogUI(arg.SessionID),
+		SessionID: arg.SessionID,
+		SecretUI:  h.getSecretUI(arg.SessionID, h.G()),
+		GPGUI:     h.getGPGUI(arg.SessionID),
+	}
+	eng := engine.NewPGPPushPrivate(arg)
+	m := libkb.NewMetaContext(ctx, h.G()).WithUIs(uis)
+	return engine.RunEngine2(m, eng)
+}
+
+func (h *PGPHandler) PGPPullPrivate(ctx context.Context, arg keybase1.PGPPullPrivateArg) error {
+	uis := libkb.UIs{
+		LogUI:     h.getLogUI(arg.SessionID),
+		SessionID: arg.SessionID,
+		SecretUI:  h.getSecretUI(arg.SessionID, h.G()),
+		GPGUI:     h.getGPGUI(arg.SessionID),
+	}
+	eng := engine.NewPGPPullPrivate(arg)
+	m := libkb.NewMetaContext(ctx, h.G()).WithUIs(uis)
+	return engine.RunEngine2(m, eng)
 }

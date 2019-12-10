@@ -3,6 +3,7 @@ package chat
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/keybase/client/go/auth"
@@ -11,6 +12,7 @@ import (
 	"github.com/keybase/client/go/chat/utils"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/chat1"
+	"github.com/keybase/client/go/protocol/gregor1"
 	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/go-framed-msgpack-rpc/rpc"
 	context "golang.org/x/net/context"
@@ -47,10 +49,9 @@ func (t *KBFSNameInfoSource) tlfKeysClient() (*keybase1.TlfKeysClient, error) {
 	}, nil
 }
 
-func (t *KBFSNameInfoSource) Lookup(ctx context.Context, tlfName string, public bool) (res *types.NameInfo, err error) {
-	defer t.Trace(ctx, func() error { return err }, fmt.Sprintf("Lookup(%s)", tlfName))()
+func (t *KBFSNameInfoSource) loadAll(ctx context.Context, tlfName string, public bool) (res types.NameInfo, keys types.AllCryptKeys, err error) {
 	var lastErr error
-	res = types.NewNameInfo()
+	keys = types.NewAllCryptKeys()
 	visibility := keybase1.TLFVisibility_PRIVATE
 	if public {
 		visibility = keybase1.TLFVisibility_PUBLIC
@@ -61,16 +62,16 @@ func (t *KBFSNameInfoSource) Lookup(ctx context.Context, tlfName string, public 
 			pres, err = t.PublicCanonicalTLFNameAndID(ctx, tlfName)
 			res.CanonicalName = pres.CanonicalName.String()
 			res.ID = chat1.TLFID(pres.TlfID.ToBytes())
-			res.IdentifyFailures = pres.Breaks.Breaks
+			keys[chat1.ConversationMembersType_KBFS] =
+				append(keys[chat1.ConversationMembersType_KBFS], publicCryptKey)
 		} else {
 			var cres keybase1.GetTLFCryptKeysRes
 			cres, err = t.CryptKeys(ctx, tlfName)
 			res.CanonicalName = cres.NameIDBreaks.CanonicalName.String()
 			res.ID = chat1.TLFID(cres.NameIDBreaks.TlfID.ToBytes())
-			res.IdentifyFailures = cres.NameIDBreaks.Breaks.Breaks
 			for _, key := range cres.CryptKeys {
-				res.CryptKeys[chat1.ConversationMembersType_KBFS] =
-					append(res.CryptKeys[chat1.ConversationMembersType_KBFS], key)
+				keys[chat1.ConversationMembersType_KBFS] =
+					append(keys[chat1.ConversationMembersType_KBFS], key)
 			}
 		}
 		if err != nil {
@@ -81,33 +82,94 @@ func (t *KBFSNameInfoSource) Lookup(ctx context.Context, tlfName string, public 
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			return res, err
+			return res, keys, err
 		}
-		return res, nil
+		return res, keys, nil
+	}
+	return res, keys, lastErr
+}
+
+func (t *KBFSNameInfoSource) LookupID(ctx context.Context, tlfName string, public bool) (res types.NameInfo, err error) {
+	defer t.Trace(ctx, func() error { return err }, fmt.Sprintf("Lookup(%s)", tlfName))()
+	res, _, err = t.loadAll(ctx, tlfName, public)
+	return res, err
+}
+
+func (t *KBFSNameInfoSource) LookupName(ctx context.Context, tlfID chat1.TLFID, public bool,
+	unverifiedTLFName string) (res types.NameInfo, err error) {
+	return res, fmt.Errorf("LookupName not implemented for KBFSNameInfoSource")
+}
+
+func (t *KBFSNameInfoSource) TeamBotSettings(ctx context.Context, tlfName string, tlfID chat1.TLFID,
+	membersType chat1.ConversationMembersType, public bool) (map[keybase1.UserVersion]keybase1.TeamBotSettings, error) {
+	return nil, errors.New("TeamBotSettings not implemented for KBFSNameInfoSource")
+}
+
+func (t *KBFSNameInfoSource) AllCryptKeys(ctx context.Context, tlfName string, public bool) (res types.AllCryptKeys, err error) {
+	defer t.Trace(ctx, func() error { return err }, "AllCryptKeys(%s,%v)", tlfName, public)()
+	_, res, err = t.loadAll(ctx, tlfName, public)
+	return res, err
+}
+
+func (t *KBFSNameInfoSource) EncryptionKey(ctx context.Context, tlfName string, tlfID chat1.TLFID,
+	membersType chat1.ConversationMembersType, public bool, botUID *gregor1.UID) (res types.CryptKey, ni types.NameInfo, err error) {
+	defer t.Trace(ctx, func() error { return err }, "EncryptionKey(%s,%v)", tlfName, public)()
+	if botUID != nil {
+		return res, ni, fmt.Errorf("TeambotKeys not supported by KBFS")
+	}
+	ni, allKeys, err := t.loadAll(ctx, tlfName, public)
+	if err != nil {
+		return res, ni, err
+	}
+	keys := allKeys[chat1.ConversationMembersType_KBFS]
+	if len(keys) == 0 {
+		return res, ni, errors.New("no encryption keys for tlf")
+	}
+	return keys[len(keys)-1], ni, nil
+}
+
+func (t *KBFSNameInfoSource) DecryptionKey(ctx context.Context, tlfName string, tlfID chat1.TLFID,
+	membersType chat1.ConversationMembersType, public bool,
+	keyGeneration int, kbfsEncrypted bool, botUID *gregor1.UID) (res types.CryptKey, err error) {
+	defer t.Trace(ctx, func() error { return err }, "DecryptionKey(%s,%v)", tlfName, public)()
+
+	if botUID != nil {
+		return res, fmt.Errorf("TeambotKeys not supported by KBFS")
 	}
 
-	return res, lastErr
+	if public {
+		return publicCryptKey, nil
+	}
+
+	ni, err := t.AllCryptKeys(ctx, tlfName, public)
+	if err != nil {
+		// Banned folders are only detectable by the error string currently,
+		// hopefully we can do something better in the future.
+		if err.Error() == "Operations for this folder are temporarily throttled (error 2800)" {
+			return nil, NewDecryptionKeyNotFoundError(keyGeneration, public, kbfsEncrypted)
+		}
+		// This happens to finalized folders that are no longer being rekeyed
+		if strings.HasPrefix(err.Error(), "Can't get TLF private key for key generation") {
+			return nil, NewDecryptionKeyNotFoundError(keyGeneration, public, kbfsEncrypted)
+		}
+		return nil, err
+	}
+	for _, key := range ni[chat1.ConversationMembersType_KBFS] {
+		if key.Generation() == keyGeneration {
+			return key, nil
+		}
+	}
+	return nil, NewDecryptionKeyNotFoundError(keyGeneration, public, kbfsEncrypted)
 }
 
-func (t *KBFSNameInfoSource) EncryptionKeys(ctx context.Context, tlfName string, tlfID chat1.TLFID,
-	membersType chat1.ConversationMembersType, public bool) (*types.NameInfo, error) {
-	return t.Lookup(ctx, tlfName, public)
-}
-
-func (t *KBFSNameInfoSource) DecryptionKeys(ctx context.Context, tlfName string, tlfID chat1.TLFID,
-	membersType chat1.ConversationMembersType, public bool,
-	keyGeneration int, kbfsEncrypted bool) (*types.NameInfo, error) {
-	return t.Lookup(ctx, tlfName, public)
-}
-
-func (t *KBFSNameInfoSource) EphemeralEncryptionKey(ctx context.Context, tlfName string, tlfID chat1.TLFID,
-	membersType chat1.ConversationMembersType, public bool) (teamEK keybase1.TeamEk, err error) {
+func (t *KBFSNameInfoSource) EphemeralEncryptionKey(mctx libkb.MetaContext, tlfName string, tlfID chat1.TLFID,
+	membersType chat1.ConversationMembersType, public bool, botUID *gregor1.UID) (teamEK types.EphemeralCryptKey, err error) {
 	return teamEK, fmt.Errorf("KBFSNameInfoSource doesn't support ephemeral keys")
 }
 
-func (t *KBFSNameInfoSource) EphemeralDecryptionKey(ctx context.Context, tlfName string, tlfID chat1.TLFID,
-	membersType chat1.ConversationMembersType, public bool,
-	generation keybase1.EkGeneration) (teamEK keybase1.TeamEk, err error) {
+func (t *KBFSNameInfoSource) EphemeralDecryptionKey(mctx libkb.MetaContext, tlfName string, tlfID chat1.TLFID,
+	membersType chat1.ConversationMembersType, public bool, botUID *gregor1.UID,
+	generation keybase1.EkGeneration, contentCtime *gregor1.Time) (teamEK types.EphemeralCryptKey, err error) {
 	return teamEK, fmt.Errorf("KBFSNameInfoSource doesn't support ephemeral keys")
 }
 
@@ -117,7 +179,7 @@ func (t *KBFSNameInfoSource) ShouldPairwiseMAC(ctx context.Context, tlfName stri
 }
 
 func (t *KBFSNameInfoSource) CryptKeys(ctx context.Context, tlfName string) (res keybase1.GetTLFCryptKeysRes, ferr error) {
-	identBehavior, _, ok := IdentifyMode(ctx)
+	identBehavior, _, ok := globals.CtxIdentifyMode(ctx)
 	if !ok {
 		return res, fmt.Errorf("invalid context with no chat metadata")
 	}
@@ -134,7 +196,7 @@ func (t *KBFSNameInfoSource) CryptKeys(ctx context.Context, tlfName string) (res
 	tlfName = string(username) + "," + tlfName
 
 	// call Identify and GetTLFCryptKeys concurrently:
-	group, ectx := errgroup.WithContext(BackgroundContext(ctx, t.G()))
+	group, ectx := errgroup.WithContext(globals.BackgroundChatCtx(ctx, t.G()))
 
 	var ib []keybase1.TLFIdentifyFailure
 	doneCh := make(chan struct{})
@@ -181,19 +243,11 @@ func (t *KBFSNameInfoSource) CryptKeys(ctx context.Context, tlfName string) (res
 		return keybase1.GetTLFCryptKeysRes{}, err
 	}
 	res.NameIDBreaks.Breaks.Breaks = ib
-
-	// GUI Strict mode errors are swallowed earlier, return an error now (key is that it is
-	// after send to IdentifyNotifier)
-	if identBehavior == keybase1.TLFIdentifyBehavior_CHAT_GUI_STRICT &&
-		len(res.NameIDBreaks.Breaks.Breaks) > 0 {
-		return res, libkb.NewIdentifySummaryError(res.NameIDBreaks.Breaks.Breaks[0])
-	}
-
 	return res, nil
 }
 
 func (t *KBFSNameInfoSource) PublicCanonicalTLFNameAndID(ctx context.Context, tlfName string) (res keybase1.CanonicalTLFNameAndIDWithBreaks, ferr error) {
-	identBehavior, _, ok := IdentifyMode(ctx)
+	identBehavior, _, ok := globals.CtxIdentifyMode(ctx)
 	if !ok {
 		return res, fmt.Errorf("invalid context with no chat metadata")
 	}
@@ -201,7 +255,7 @@ func (t *KBFSNameInfoSource) PublicCanonicalTLFNameAndID(ctx context.Context, tl
 		fmt.Sprintf("PublicCanonicalTLFNameAndID(tlf=%s,mode=%v)", tlfName, identBehavior))()
 
 	// call Identify and CanonicalTLFNameAndIDWithBreaks concurrently:
-	group, ectx := errgroup.WithContext(BackgroundContext(ctx, t.G()))
+	group, ectx := errgroup.WithContext(globals.BackgroundChatCtx(ctx, t.G()))
 
 	var ib []keybase1.TLFIdentifyFailure
 	doneCh := make(chan struct{})
@@ -249,13 +303,6 @@ func (t *KBFSNameInfoSource) PublicCanonicalTLFNameAndID(ctx context.Context, tl
 		return keybase1.CanonicalTLFNameAndIDWithBreaks{}, err
 	}
 	res.Breaks.Breaks = ib
-
-	// GUI Strict mode errors are swallowed earlier, return an error now (key is that it is
-	// after send to IdentifyNotifier)
-	if identBehavior == keybase1.TLFIdentifyBehavior_CHAT_GUI_STRICT && len(res.Breaks.Breaks) > 0 {
-		return res, libkb.NewIdentifySummaryError(res.Breaks.Breaks[0])
-	}
-
 	return res, nil
 }
 

@@ -3,13 +3,14 @@ package libkb
 import (
 	"encoding/hex"
 	"errors"
+
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 )
 
 type ProvisionalLoginContext struct {
 	MetaContextified
 	username     NormalizedUsername
-	uid          keybase1.UID
+	uv           keybase1.UserVersion
 	salt         []byte
 	streamCache  *PassphraseStreamCache
 	localSession *Session
@@ -28,22 +29,22 @@ func newProvisionalLoginContext(m MetaContext) *ProvisionalLoginContext {
 	}
 }
 
-func newProvisionalLoginContextWithUIDAndUsername(m MetaContext, uid keybase1.UID, un NormalizedUsername) *ProvisionalLoginContext {
+func newProvisionalLoginContextWithUserVersionAndUsername(m MetaContext, uv keybase1.UserVersion, un NormalizedUsername) *ProvisionalLoginContext {
 	ret := newProvisionalLoginContext(m)
-	ret.uid = uid
+	ret.uv = uv
 	ret.username = un
 	return ret
 }
 
 func (p *ProvisionalLoginContext) Dump(m MetaContext, prefix string) {
-	m.CDebugf("%sUsername: %s", prefix, p.username)
-	m.CDebugf("%sUID: %s", prefix, p.uid)
+	m.Debug("%sUsername: %s", prefix, p.username)
+	m.Debug("%sUserVersion: %v", prefix, p.uv)
 	if p.salt != nil {
-		m.CDebugf("%sSalt: %s", prefix, hex.EncodeToString(p.salt))
+		m.Debug("%sSalt: %s", prefix, hex.EncodeToString(p.salt))
 	}
-	m.CDebugf("%sPassphraseCache: %v", prefix, (p.streamCache != nil))
-	m.CDebugf("%sLocalSession: %v", prefix, (p.localSession != nil))
-	m.CDebugf("%sLoginSession: %v", prefix, (p.loginSession != nil))
+	m.Debug("%sPassphraseCache: %v", prefix, (p.streamCache != nil))
+	m.Debug("%sLocalSession: %v", prefix, (p.localSession != nil))
+	m.Debug("%sLoginSession: %v", prefix, (p.loginSession != nil))
 }
 
 func (p *ProvisionalLoginContext) LoggedInLoad() (bool, error) {
@@ -61,44 +62,15 @@ func (p *ProvisionalLoginContext) SetStreamCache(c *PassphraseStreamCache) {
 func (p *ProvisionalLoginContext) PassphraseStreamCache() *PassphraseStreamCache {
 	return p.streamCache
 }
-func (p *ProvisionalLoginContext) ClearStreamCache() {
-	if p.streamCache != nil {
-		p.streamCache.Clear()
-	}
-}
-func (p *ProvisionalLoginContext) SetStreamGeneration(gen PassphraseGeneration, nilPPStreamOK bool) {
-	found := p.PassphraseStreamCache().MutatePassphraseStream(func(ps *PassphraseStream) {
-		ps.SetGeneration(gen)
-	})
-	if !found && !nilPPStreamOK {
-		p.M().CWarningf("Passphrase stream was nil; unexpected")
-	}
-}
 func (p *ProvisionalLoginContext) PassphraseStream() *PassphraseStream {
 	if p.PassphraseStreamCache() == nil {
 		return nil
 	}
 	return p.PassphraseStreamCache().PassphraseStream()
 }
-func (p *ProvisionalLoginContext) GetStreamGeneration() (ret PassphraseGeneration) {
-	if ps := p.PassphraseStream(); ps != nil {
-		ret = ps.Generation()
-	}
-	return ret
-}
 func (p *ProvisionalLoginContext) CreateLoginSessionWithSalt(emailOrUsername string, salt []byte) error {
 	if salt != nil {
 		p.salt = append([]byte{}, salt...)
-	}
-	return nil
-}
-func (p *ProvisionalLoginContext) LoadLoginSession(username string) error {
-	nun := NewNormalizedUsername(username)
-	if !p.username.Eq(nun) {
-		return LoggedInWrongUserError{p.username, nun}
-	}
-	if p.loginSession == nil {
-		return LoginSessionNotFound{}
 	}
 	return nil
 }
@@ -108,56 +80,55 @@ func (p *ProvisionalLoginContext) LoginSession() *LoginSession {
 func (p *ProvisionalLoginContext) SetLoginSession(l *LoginSession) {
 	p.loginSession = l
 }
-func (p *ProvisionalLoginContext) ClearLoginSession() {
-}
 func (p *ProvisionalLoginContext) LocalSession() *Session {
 	return p.localSession.Clone()
 }
 func (p *ProvisionalLoginContext) GetUID() keybase1.UID {
-	return p.uid
+	return p.uv.Uid
+}
+func (p *ProvisionalLoginContext) GetUserVersion() keybase1.UserVersion {
+	return p.uv
 }
 func (p *ProvisionalLoginContext) GetUsername() NormalizedUsername {
 	return p.username
 }
-func (p *ProvisionalLoginContext) EnsureUsername(username NormalizedUsername) {
-}
 
-func (p *ProvisionalLoginContext) SetUsernameUID(username NormalizedUsername, uid keybase1.UID) error {
-	if err := p.assertNotReused(username, uid); err != nil {
+func (p *ProvisionalLoginContext) SetUsernameUserVersion(username NormalizedUsername, uv keybase1.UserVersion) error {
+	if err := p.assertNotReused(username, uv); err != nil {
 		return err
 	}
 	p.username = username
-	p.uid = uid
+	p.uv = uv
 	return nil
 }
 
-func (p *ProvisionalLoginContext) assertNotReused(un NormalizedUsername, uid keybase1.UID) error {
-	if !(p.uid.IsNil() || p.uid.Equal(uid)) || !(p.username.IsNil() || p.username.Eq(un)) {
+func (p *ProvisionalLoginContext) assertNotReused(un NormalizedUsername, uv keybase1.UserVersion) error {
+	if !(p.uv.IsNil() || p.uv.Eq(uv)) || !(p.username.IsNil() || p.username.Eq(un)) {
 		return errors.New("can't reuse a ProvisionalLoginContext!")
 	}
 	return nil
 }
 
-func (p *ProvisionalLoginContext) SaveState(sessionID, csrf string, username NormalizedUsername, uid keybase1.UID, deviceID keybase1.DeviceID) (err error) {
-	defer p.M().CTrace("ProvisionalLoginContext#SaveState", func() error { return err })()
-	if err := p.assertNotReused(username, uid); err != nil {
+func (p *ProvisionalLoginContext) SaveState(sessionID, csrf string, username NormalizedUsername, uv keybase1.UserVersion, deviceID keybase1.DeviceID) (err error) {
+	defer p.M().Trace("ProvisionalLoginContext#SaveState", func() error { return err })()
+	if err := p.assertNotReused(username, uv); err != nil {
 		return err
 	}
-	p.uid = uid
+	p.uv = uv
 	p.username = username
-	return p.localSession.SetLoggedIn(sessionID, csrf, username, uid, deviceID)
+	return p.localSession.SetLoggedIn(sessionID, csrf, username, uv.Uid, deviceID)
 }
 
 func (p *ProvisionalLoginContext) Keyring(m MetaContext) (ret *SKBKeyringFile, err error) {
-	defer m.CTrace("ProvisionalLoginContext#Keyring", func() error { return err })()
+	defer m.Trace("ProvisionalLoginContext#Keyring", func() error { return err })()
 	if p.skbKeyring != nil {
 		return p.skbKeyring, nil
 	}
 	if p.username.IsNil() {
-		p.M().CInfof("ProvisionalLoginContext#Keyring: no username set")
+		p.M().Info("ProvisionalLoginContext#Keyring: no username set")
 		return nil, NewNoUsernameError()
 	}
-	p.M().CDebugf("Account: loading keyring for %s", p.username)
+	p.M().Debug("Account: loading keyring for %s", p.username)
 	ret, err = LoadSKBKeyring(p.username, p.M().G())
 	if err != nil {
 		return nil, err
@@ -175,7 +146,8 @@ func (p *ProvisionalLoginContext) RunSecretSyncer(m MetaContext, uid keybase1.UI
 	if uid.IsNil() {
 		uid = p.GetUID()
 	}
-	return RunSyncer(m, p.secretSyncer, uid, (p.localSession != nil), p.localSession, false /* forceReload */)
+	m = m.WithLoginContext(p)
+	return RunSyncer(m, p.secretSyncer, uid, (p.localSession != nil), false /* forceReload */)
 }
 func (p *ProvisionalLoginContext) GetUnlockedPaperEncKey() GenericKey {
 	return nil

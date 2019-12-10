@@ -49,7 +49,7 @@ func (e *PGPPurge) RequiredUIs() []libkb.UIKind {
 // SubConsumers returns the other UI consumers for this engine.
 func (e *PGPPurge) SubConsumers() []libkb.UIConsumer {
 	return []libkb.UIConsumer{
-		&SaltpackEncrypt{},
+		&SaltpackEncrypt{newKeyfinderHook: NewSaltpackUserKeyfinderAsInterface},
 	}
 }
 
@@ -139,16 +139,18 @@ func (e *PGPPurge) encryptToFile(m libkb.MetaContext, bundle *libkb.PGPKeyBundle
 		return err
 	}
 
+	// encrypt
 	arg := &SaltpackEncryptArg{
 		Source: &buf,
 		Sink:   out,
 		Opts: keybase1.SaltpackEncryptOptions{
-			// Signcryption mode would require KBFS and network access, which
-			// we don't necessarily want. The purge backup isn't expected to
-			// leave the current device anyway.
-			EncryptionOnlyMode: true,
+			Recipients:       []string{m.CurrentUsername().String()},
+			AuthenticityType: keybase1.AuthenticityType_SIGNED,
+			UsePaperKeys:     true,
+			UseDeviceKeys:    true,
+			UseEntityKeys:    true,
 		},
 	}
-	eng := NewSaltpackEncrypt(e.G(), arg)
+	eng := NewSaltpackEncrypt(arg, NewSaltpackUserKeyfinderAsInterface)
 	return RunEngine2(m, eng)
 }

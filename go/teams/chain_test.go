@@ -7,6 +7,7 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/keybase/client/go/kbtest"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/go-codec/codec"
@@ -59,6 +60,129 @@ func TestTeamSigChainParse(t *testing.T) {
 	}
 }
 
+func assertHighSeqForTeam(t *testing.T, tc libkb.TestContext, teamID *keybase1.TeamID, expected int) {
+	team, err := Load(context.TODO(), tc.G, keybase1.LoadTeamArg{
+		ID:          *teamID,
+		ForceRepoll: true,
+	})
+	require.NoError(t, err)
+	actual := int(team.chain().GetLatestHighSeqno())
+	require.Equal(t, expected, actual)
+}
+
+func TestTeamSigChainHighLinks(t *testing.T) {
+	tc := SetupTest(t, "team_sig_chain_high_links", 1)
+	defer tc.Cleanup()
+	ctx := context.TODO()
+
+	// Create some users. The owner is last so that it has the active session.
+	u2, err := kbtest.CreateAndSignupFakeUser("we", tc.G) //admin
+	require.NoError(t, err)
+	u3, err := kbtest.CreateAndSignupFakeUser("ji", tc.G) //non-admin
+	require.NoError(t, err)
+	u4, err := kbtest.CreateAndSignupFakeUser("botua", tc.G) // bot
+	require.NoError(t, err)
+	u5, err := kbtest.CreateAndSignupFakeUser("rua", tc.G) // restricted_bot
+	require.NoError(t, err)
+	u1, err := kbtest.CreateAndSignupFakeUser("je", tc.G) //owner
+	require.NoError(t, err)
+	t.Logf("create the team...")
+	// Create a team. This creates the first high link.
+	teamName := u1.Username + "t"
+	teamNameObj, err := keybase1.TeamNameFromString(teamName)
+	require.NoError(t, err)
+	teamID, err := CreateRootTeam(ctx, tc.G, teamName, keybase1.TeamSettings{})
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 1)
+
+	t.Logf("adding new reader...")
+	// Adding a new reader is not a high link, so the lastest high seq won't change.
+	_, err = AddMember(ctx, tc.G, teamName, u3.Username, keybase1.TeamRole_READER, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 1)
+
+	// Adding a new bot is not a high link, so the latest high seq won't
+	// change. Note adding a RESTRICTEDBOT results in two sigs being added, one
+	// for the membership addition and a second for bot_settings.
+	_, err = AddMember(ctx, tc.G, teamName, u4.Username, keybase1.TeamRole_RESTRICTEDBOT, &keybase1.TeamBotSettings{})
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 1)
+
+	_, err = AddMember(ctx, tc.G, teamName, u5.Username, keybase1.TeamRole_BOT, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 1)
+
+	t.Logf("adding new admin...")
+	// Adding a new admin IS a high link, so we should jump to 6.
+	_, err = AddMember(ctx, tc.G, teamName, u2.Username, keybase1.TeamRole_ADMIN, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 6)
+
+	t.Logf("promoting from admin to owner...")
+	// Promoting from admin to owner is a high link.
+	err = EditMember(ctx, tc.G, teamName, u2.Username, keybase1.TeamRole_OWNER, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 7)
+
+	t.Logf("demoting from owner to admin...")
+	// Demoting from owner to admin is a high link.
+	err = EditMember(ctx, tc.G, teamName, u2.Username, keybase1.TeamRole_ADMIN, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 8)
+
+	t.Logf("adding new subteam...")
+	// Creating a subteam is not a high link for the parent team
+	// but it is for the subteam. The link types are different
+	// "team.root" and "team.subteam_head" so we should check both teams.
+	sub := "sub"
+	subteamID, err := CreateSubteam(ctx, tc.G, sub, teamNameObj, keybase1.TeamRole_ADMIN)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, subteamID, 1)
+	assertHighSeqForTeam(t, tc, teamID, 8)
+
+	t.Logf("adding new admin to subteam...")
+	// Adding an admin to the subteam is a high link for the subteam but not
+	// the parent. Primarily, we do this to verify that high links advance
+	// the same way on subteams (since there are places that default to a
+	// value of 1 for sequence number). It's overkill to test any more than
+	// just this on the subteam since it should work the same way.
+	_, err = AddMemberByID(ctx, tc.G, *subteamID, u3.Username, keybase1.TeamRole_ADMIN, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, subteamID, 2)
+	assertHighSeqForTeam(t, tc, teamID, 8)
+
+	t.Logf("demoting admin to writer...")
+	// Back to the root team... downgrading an admin IS a high link for the root team
+	// but it is not one for the subteam, because the subteam needs to care about it's
+	// parent's high links anyway.
+	err = EditMember(ctx, tc.G, teamName, u2.Username, keybase1.TeamRole_WRITER, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 10)
+	assertHighSeqForTeam(t, tc, subteamID, 2)
+
+	t.Logf("demoting admin...")
+	// Back to the root team... downgrading an admin IS a high link for the root team
+	// but it is not one for the subteam, because the subteam needs to care about it's
+	// parent's high links anyway.
+	err = EditMember(ctx, tc.G, teamName, u2.Username, keybase1.TeamRole_WRITER, nil)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 10)
+	assertHighSeqForTeam(t, tc, subteamID, 2)
+
+	t.Logf("rotating keys...")
+	// Rotated keys do not create high links.
+	err = RotateKeyVisible(ctx, tc.G, *teamID)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 10)
+	assertHighSeqForTeam(t, tc, subteamID, 2)
+
+	t.Logf("deleting subteam...")
+	// Deleting a subteam will not create a high link.
+	err = Delete(ctx, tc.G, &teamsUI{}, *subteamID)
+	require.NoError(t, err)
+	assertHighSeqForTeam(t, tc, teamID, 10)
+}
+
 func TestTeamSigChainPlay1(t *testing.T) {
 	tc := SetupTest(t, "test_team_chains", 1)
 	defer tc.Cleanup()
@@ -78,7 +202,8 @@ func TestTeamSigChainPlay1(t *testing.T) {
 		chainLinks = append(chainLinks, chainLink)
 	}
 
-	player := NewTeamSigChainPlayer(tc.G, NewUserVersion(keybase1.UID("4bf92804c02fb7d2cd36a6d420d6f619"), 1))
+	consumer := NewUserVersion(keybase1.UID("4bf92804c02fb7d2cd36a6d420d6f619"), 1)
+	var state *TeamSigChainState
 	for _, cLink := range chainLinks {
 		link, err := unpackChainLink(&cLink)
 		require.NoError(t, err)
@@ -90,13 +215,13 @@ func TestTeamSigChainPlay1(t *testing.T) {
 				EldestSeqno: keybase1.Seqno(1),
 			}
 		}
-		err = player.AppendChainLink(context.TODO(), link, signerToX(signer))
+		newState, err := AppendChainLink(context.TODO(), tc.G, consumer, state, link, signerToX(signer))
 		require.NoError(t, err)
+		state = &newState
 	}
 
 	// Check once before and after serializing and deserializing
-	state, err := player.GetState()
-	require.NoError(t, err)
+	mctx := libkb.NewMetaContextForTest(tc)
 	for i := 0; i < 2; i++ {
 		if i == 0 {
 			t.Logf("testing fresh")
@@ -106,13 +231,15 @@ func TestTeamSigChainPlay1(t *testing.T) {
 
 		require.Equal(t, "t_9d6d1e37", string(state.LatestLastNamePart()))
 		require.False(t, state.IsSubteam())
-		ptk, err := state.GetLatestPerTeamKey()
+		ptk, err := state.GetLatestPerTeamKey(mctx)
 		require.NoError(t, err)
 		require.Equal(t, keybase1.PerTeamKeyGeneration(2), ptk.Gen)
 		require.Equal(t, keybase1.Seqno(3), ptk.Seqno)
 		require.Equal(t, "0120802f55ed5e14f61c730871b5e99d637054ff7f5ba0c1b2cc52b154e3baf80a000a", string(ptk.SigKID))
 		require.Equal(t, "0121e2511cbfb0418187a8e19183a1cd92637bc83fe116d1eb8984f52394495b5f120a", string(ptk.EncKID))
 		require.Equal(t, keybase1.Seqno(3), state.GetLatestSeqno())
+		require.Equal(t, state.GetLatestHighSeqno(), keybase1.Seqno(1))
+		require.Equal(t, state.GetLatestHighLinkID(), keybase1.LinkID("62cb761ad346a3d28be1eed107c35548a2dd6fade9219a38591841f62d586cfe"))
 
 		checkRole := func(uid keybase1.UID, role keybase1.TeamRole) {
 			uv := NewUserVersion(uid, 1)
@@ -136,7 +263,7 @@ func TestTeamSigChainPlay1(t *testing.T) {
 		// Reserialize
 		bs, err := encode(state.inner)
 		require.NoError(t, err, "encode")
-		state = TeamSigChainState{}
+		state = &TeamSigChainState{}
 		err = decode(bs, &state.inner)
 		require.NoError(t, err, "decode")
 	}
@@ -161,7 +288,8 @@ func TestTeamSigChainPlay2(t *testing.T) {
 		chainLinks = append(chainLinks, chainLink)
 	}
 
-	player := NewTeamSigChainPlayer(tc.G, NewUserVersion("99759da4f968b16121ece44652f01a19", 1))
+	consumer := NewUserVersion("99759da4f968b16121ece44652f01a19", 1)
+	var state *TeamSigChainState
 	for _, cLink := range chainLinks {
 		link, err := unpackChainLink(&cLink)
 		require.NoError(t, err)
@@ -173,24 +301,27 @@ func TestTeamSigChainPlay2(t *testing.T) {
 				EldestSeqno: keybase1.Seqno(1),
 			}
 		}
-		err = player.AppendChainLink(context.TODO(), link, signerToX(signer))
+		newState, err := AppendChainLink(context.TODO(), tc.G, consumer, state, link, signerToX(signer))
 		require.NoError(t, err)
+		state = &newState
 	}
 	require.NoError(t, err)
 
+	mctx := libkb.NewMetaContextForTest(tc)
+
 	// Check once before and after serializing and deserializing
-	state, err := player.GetState()
-	require.NoError(t, err)
 	for i := 0; i < 2; i++ {
 		require.Equal(t, "t_bfaadb41", string(state.LatestLastNamePart()))
 		require.False(t, state.IsSubteam())
-		ptk, err := state.GetLatestPerTeamKey()
+		ptk, err := state.GetLatestPerTeamKey(mctx)
 		require.NoError(t, err)
 		require.Equal(t, keybase1.PerTeamKeyGeneration(1), ptk.Gen)
 		require.Equal(t, keybase1.Seqno(1), ptk.Seqno)
 		require.Equal(t, "01208b245208e8951cde7abd3f5ebac5579424e51ed0951fe14ac8a7996c9ccf8ae50a", string(ptk.SigKID))
 		require.Equal(t, "01218ca00b08b4ee5729d957cf14155098b74199588bb5eee778ad1eae58bce26c370a", string(ptk.EncKID))
 		require.Equal(t, keybase1.Seqno(2), state.GetLatestSeqno())
+		require.Equal(t, state.GetLatestHighSeqno(), keybase1.Seqno(1))
+		require.Equal(t, state.GetLatestHighLinkID(), keybase1.LinkID("6828ac32019bd8c0327ea57cd21b6182c3b6e4d4080182bb0119f9a630833f51"))
 
 		checkRole := func(uid keybase1.UID, role keybase1.TeamRole) {
 			uv := NewUserVersion(uid, 1)
@@ -213,11 +344,17 @@ func TestTeamSigChainPlay2(t *testing.T) {
 		xs, err = state.GetUsersWithRole(keybase1.TeamRole_READER)
 		require.NoError(t, err)
 		require.Len(t, xs, 0)
+		xs, err = state.GetUsersWithRole(keybase1.TeamRole_BOT)
+		require.NoError(t, err)
+		require.Len(t, xs, 0)
+		xs, err = state.GetUsersWithRole(keybase1.TeamRole_RESTRICTEDBOT)
+		require.NoError(t, err)
+		require.Len(t, xs, 0)
 
 		// Reserialize
 		bs, err := encode(state.inner)
 		require.NoError(t, err, "encode")
-		state = TeamSigChainState{}
+		state = &TeamSigChainState{}
 		err = decode(bs, &state.inner)
 		require.NoError(t, err, "decode")
 	}
@@ -258,7 +395,8 @@ func TestTeamSigChainWithInvites(t *testing.T) {
 		chainLinks = append(chainLinks, chainLink)
 	}
 
-	player := NewTeamSigChainPlayer(tc.G, NewUserVersion("99759da4f968b16121ece44652f01a19", 1))
+	consumer := NewUserVersion("99759da4f968b16121ece44652f01a19", 1)
+	var state *TeamSigChainState
 	for _, cLink := range chainLinks {
 		link, err := unpackChainLink(&cLink)
 		require.NoError(t, err)
@@ -270,13 +408,10 @@ func TestTeamSigChainWithInvites(t *testing.T) {
 				EldestSeqno: keybase1.Seqno(1),
 			}
 		}
-		err = player.AppendChainLink(context.TODO(), link, signerToX(signer))
+		newState, err := AppendChainLink(context.TODO(), tc.G, consumer, state, link, signerToX(signer))
 		require.NoError(t, err)
+		state = &newState
 	}
-	require.NoError(t, err)
-	// Check once before and after serializing and deserializing
-	state, err := player.GetState()
-	require.NoError(t, err)
 	checkInvite := func(s string, f func(i *keybase1.TeamInvite)) {
 		var i *keybase1.TeamInvite
 		tmp, ok := state.inner.ActiveInvites[keybase1.TeamInviteID(s)]
@@ -310,9 +445,77 @@ func TestTeamSigChainWithInvites(t *testing.T) {
 	})
 }
 
-func signerToX(uv *keybase1.UserVersion) *signerX {
+func signerToX(uv *keybase1.UserVersion) *SignerX {
 	if uv == nil {
 		return nil
 	}
-	return &signerX{signer: *uv}
+	return &SignerX{signer: *uv}
+}
+
+func TestMemberCtime(t *testing.T) {
+	uv := NewUserVersion("foo", 1)
+	var points []keybase1.UserLogPoint
+	newTeamChainState := func() TeamSigChainState {
+		return TeamSigChainState{
+			inner: keybase1.TeamSigChainState{
+				UserLog: map[keybase1.UserVersion][]keybase1.UserLogPoint{
+					uv: points,
+				},
+			},
+		}
+	}
+
+	// nil points
+	tcs := newTeamChainState()
+	ctime := tcs.MemberCtime(uv)
+	require.Nil(t, ctime)
+
+	// user joined as a writer
+	points = append(points,
+		keybase1.UserLogPoint{
+			Role: keybase1.TeamRole_WRITER,
+			SigMeta: keybase1.SignatureMetadata{
+				Time: 1,
+			},
+		})
+	tcs = newTeamChainState()
+	ctime = tcs.MemberCtime(uv)
+	require.NotNil(t, ctime)
+	require.EqualValues(t, 1, *ctime)
+
+	points = append(points,
+		keybase1.UserLogPoint{
+			Role: keybase1.TeamRole_NONE,
+			SigMeta: keybase1.SignatureMetadata{
+				Time: 2,
+			},
+		},
+		keybase1.UserLogPoint{
+			Role: keybase1.TeamRole_ADMIN,
+			SigMeta: keybase1.SignatureMetadata{
+				Time: 3,
+			},
+		})
+
+	// user left and joined later as an admin
+	tcs = newTeamChainState()
+	ctime = tcs.MemberCtime(uv)
+	require.NotNil(t, ctime)
+	require.EqualValues(t, 3, *ctime)
+
+	// user had a bunch of non-NONE roles, we should return the first join time
+	points = nil
+	for i := 0; i < 5; i++ {
+		points = append(points,
+			keybase1.UserLogPoint{
+				Role: keybase1.TeamRole_WRITER,
+				SigMeta: keybase1.SignatureMetadata{
+					Time: keybase1.Time(i),
+				},
+			})
+		tcs = newTeamChainState()
+		ctime = tcs.MemberCtime(uv)
+		require.NotNil(t, ctime)
+		require.EqualValues(t, 0, *ctime)
+	}
 }

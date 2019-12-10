@@ -29,25 +29,25 @@ func (t *Tracker2Syncer) dbKey(u keybase1.UID) DbKey {
 	return DbKeyUID(DBTrackers2, u)
 }
 
-func (t *Tracker2Syncer) loadFromStorage(m MetaContext, uid keybase1.UID) error {
+func (t *Tracker2Syncer) loadFromStorage(m MetaContext, uid keybase1.UID, useExpiration bool) error {
 	var err error
 	var found bool
 	var tmp keybase1.UserSummary2Set
-	defer m.CTrace(fmt.Sprintf("loadFromStorage(%s)", uid), func() error { return err })()
+	defer m.Trace(fmt.Sprintf("loadFromStorage(%s)", uid), func() error { return err })()
 	found, err = t.G().LocalDb.GetInto(&tmp, t.dbKey(uid))
 	if err != nil {
 		return err
 	}
 	if !found {
-		m.CDebugf("| no cached copy found")
+		m.Debug("| no cached copy found")
 		return nil
 	}
 	cachedAt := keybase1.FromTime(tmp.Time)
-	if time.Now().Sub(cachedAt) > cacheTimeout {
-		m.CDebugf("| expired; cached at %s", cachedAt)
+	if useExpiration && time.Since(cachedAt) > cacheTimeout {
+		m.Debug("| expired; cached at %s", cachedAt)
 		return nil
 	}
-	m.CDebugf("| found a record, cached %s", cachedAt)
+	m.Debug("| found a record, cached %s", cachedAt)
 	t.res = &tmp
 	return nil
 }
@@ -60,9 +60,9 @@ func (t *Tracker2Syncer) getLoadedVersion() int {
 	return ret
 }
 
-func (t *Tracker2Syncer) syncFromServer(m MetaContext, uid keybase1.UID, sr SessionReader, forceReload bool) (err error) {
+func (t *Tracker2Syncer) syncFromServer(m MetaContext, uid keybase1.UID, forceReload bool) (err error) {
 
-	defer m.CTrace(fmt.Sprintf("syncFromServer(%s)", uid), func() error { return err })()
+	defer m.Trace(fmt.Sprintf("syncFromServer(%s)", uid), func() error { return err })()
 
 	hargs := HTTPArgs{
 		"uid":        UIDArg(uid),
@@ -75,13 +75,11 @@ func (t *Tracker2Syncer) syncFromServer(m MetaContext, uid keybase1.UID, sr Sess
 		hargs.Add("version", I{lv})
 	}
 	var res *APIRes
-	res, err = t.G().API.Get(APIArg{
-		Endpoint:    "user/list_followers_for_display",
-		Args:        hargs,
-		SessionR:    sr,
-		MetaContext: m,
+	res, err = m.G().API.Get(m, APIArg{
+		Endpoint: "user/list_followers_for_display",
+		Args:     hargs,
 	})
-	m.CDebugf("| syncFromServer() -> %s", ErrToOk(err))
+	m.Debug("| syncFromServer() -> %s", ErrToOk(err))
 	if err != nil {
 		return err
 	}
@@ -91,12 +89,12 @@ func (t *Tracker2Syncer) syncFromServer(m MetaContext, uid keybase1.UID, sr Sess
 	}
 	tmp.Time = keybase1.ToTime(time.Now())
 	if lv < 0 || tmp.Version > lv || forceReload {
-		m.CDebugf("| syncFromServer(): got update %d > %d (%d records)", tmp.Version, lv,
+		m.Debug("| syncFromServer(): got update %d > %d (%d records)", tmp.Version, lv,
 			len(tmp.Users))
 		t.res = &tmp
 		t.dirty = true
 	} else {
-		m.CDebugf("| syncFromServer(): no change needed @ %d", lv)
+		m.Debug("| syncFromServer(): no change needed @ %d", lv)
 	}
 	return nil
 }
@@ -117,6 +115,34 @@ func (t *Tracker2Syncer) store(m MetaContext, uid keybase1.UID) error {
 
 func (t *Tracker2Syncer) needsLogin(m MetaContext) bool {
 	return false
+}
+
+func (t *Tracker2Syncer) Block(m MetaContext, badUIDs map[keybase1.UID]bool) (err error) {
+	defer m.Trace(fmt.Sprintf("Tracker2Syncer#Block(%+v)", badUIDs), func() error { return err })()
+	t.Lock()
+	defer t.Unlock()
+	if t.res == nil {
+		m.Debug("No followers loaded, so nothing to do")
+		return nil
+	}
+
+	err = t.loadFromStorage(m, t.callerUID, true)
+	if err != nil {
+		return err
+	}
+
+	var newUsers []keybase1.UserSummary2
+	for _, userSummary := range t.res.Users {
+		if badUIDs[userSummary.Uid] {
+			m.Debug("Filtering bad user out of state: %s", userSummary.Uid)
+			t.dirty = true
+		} else {
+			newUsers = append(newUsers, userSummary)
+		}
+	}
+	t.res.Users = newUsers
+	err = t.store(m, t.callerUID)
+	return err
 }
 
 func (t *Tracker2Syncer) Result() keybase1.UserSummary2Set {

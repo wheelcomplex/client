@@ -15,12 +15,15 @@ import (
 func GetCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Command {
 	ret := []cli.Command{
 		NewCmdAccount(cl, g),
+		NewCmdAPICall(cl, g),
 		NewCmdBase62(cl, g),
+		NewCmdBlocks(cl, g),
+		NewCmdBot(cl, g),
 		NewCmdBTC(cl, g),
 		NewCmdCA(cl, g),
 		NewCmdChat(cl, g),
-		NewCmdCompatDir(cl),
-		NewCmdCompatPush(cl),
+		NewCmdCompatDir(cl, g),
+		NewCmdCompatPush(cl, g),
 		NewCmdConfig(cl, g),
 		NewCmdCtl(cl, g),
 		NewCmdCurrency(cl, g),
@@ -38,6 +41,7 @@ func GetCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Comma
 		NewCmdHome(cl, g),
 		NewCmdID(cl, g),
 		NewCmdInterestingPeople(cl, g),
+		NewCmdKVStore(cl, g),
 		NewCmdListTracking(cl, g),
 		NewCmdListTrackers(cl, g),
 		NewCmdLog(cl, g),
@@ -52,7 +56,8 @@ func GetCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Comma
 		NewCmdProve(cl, g),
 		NewCmdRekey(cl, g),
 		NewCmdRIIT(cl, g),
-		NewCmdSearch(cl, g),
+		newCmdScript(cl, g, !libkb.BuildTagProduction),
+		NewCmdSelfProvision(cl, g),
 		NewCmdSign(cl, g),
 		NewCmdSigs(cl, g),
 		NewCmdSignup(cl, g),
@@ -67,6 +72,9 @@ func GetCommands(cl *libcmdline.CommandLine, g *libkb.GlobalContext) []cli.Comma
 		NewCmdVerify(cl, g),
 		NewCmdVersion(cl, g),
 		newCmdWallet(cl, g),
+		newCmdWebAuthToken(cl, g),
+		newCmdUploadAvatar(cl, g, true /* hidden */),
+		NewCmdAudit(cl, g),
 	}
 	ret = append(ret, getBuildSpecificCommands(cl, g)...)
 	ret = append(ret, getPlatformSpecificCommands(cl, g)...)

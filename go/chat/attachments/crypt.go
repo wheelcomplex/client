@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/keybase/client/go/chat/signencrypt"
+	"github.com/keybase/client/go/kbcrypto"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/go-crypto/ed25519"
 )
@@ -64,7 +65,7 @@ func NewSignEncrypter() *SignEncrypter {
 	return &SignEncrypter{}
 }
 
-func (s *SignEncrypter) EncryptedLen(size int) int {
+func (s *SignEncrypter) EncryptedLen(size int64) int64 {
 	return signencrypt.GetSealedSize(size)
 }
 
@@ -75,14 +76,14 @@ func (s *SignEncrypter) Encrypt(r io.Reader) (io.Reader, error) {
 	if err := s.makeKeys(); err != nil {
 		return nil, err
 	}
-	return signencrypt.NewEncodingReader(s.encKey, s.signKey, libkb.SignaturePrefixChatAttachment, nonceConst, r), nil
+	return signencrypt.NewEncodingReader(s.encKey, s.signKey, kbcrypto.SignaturePrefixChatAttachment, nonceConst, r), nil
 }
 
 func (s *SignEncrypter) EncryptWithNonce(r io.Reader, nonce signencrypt.Nonce) (io.Reader, error) {
 	if err := s.makeKeys(); err != nil {
 		return nil, err
 	}
-	return signencrypt.NewEncodingReader(s.encKey, s.signKey, libkb.SignaturePrefixChatAttachment, nonce, r), nil
+	return signencrypt.NewEncodingReader(s.encKey, s.signKey, kbcrypto.SignaturePrefixChatAttachment, nonce, r), nil
 }
 
 // EncryptResume is used to create a SignEncrypter to resume an interrupted attachment upload.
@@ -92,19 +93,19 @@ func (s *SignEncrypter) EncryptResume(r io.Reader, nonce signencrypt.Nonce, encK
 	s.encKey = encKey
 	s.signKey = signKey
 	s.verifyKey = verifyKey
-	return signencrypt.NewEncodingReader(s.encKey, s.signKey, libkb.SignaturePrefixChatAttachment, nonce, r), nil
+	return signencrypt.NewEncodingReader(s.encKey, s.signKey, kbcrypto.SignaturePrefixChatAttachment, nonce, r), nil
 }
 
 func (s *SignEncrypter) EncryptKey() []byte {
-	return []byte((*s.encKey)[:])
+	return (*s.encKey)[:]
 }
 
 func (s *SignEncrypter) SignKey() []byte {
-	return []byte((*s.signKey)[:])
+	return (*s.signKey)[:]
 }
 
 func (s *SignEncrypter) VerifyKey() []byte {
-	return []byte((*s.verifyKey)[:])
+	return (*s.verifyKey)[:]
 }
 
 func (s *SignEncrypter) makeKeys() error {
@@ -145,7 +146,7 @@ func (s *SignDecrypter) Decrypt(r io.Reader, encKey, verifyKey []byte) io.Reader
 	copy(xencKey[:], encKey)
 	var xverifyKey [ed25519.PublicKeySize]byte
 	copy(xverifyKey[:], verifyKey)
-	return signencrypt.NewDecodingReader(&xencKey, &xverifyKey, libkb.SignaturePrefixChatAttachment, nonceConst, r)
+	return signencrypt.NewDecodingReader(&xencKey, &xverifyKey, kbcrypto.SignaturePrefixChatAttachment, nonceConst, r)
 }
 
 func (s *SignDecrypter) DecryptWithNonce(r io.Reader, nonce signencrypt.Nonce, encKey, verifyKey []byte) (plaintext io.Reader) {
@@ -153,5 +154,5 @@ func (s *SignDecrypter) DecryptWithNonce(r io.Reader, nonce signencrypt.Nonce, e
 	copy(xencKey[:], encKey)
 	var xverifyKey [ed25519.PublicKeySize]byte
 	copy(xverifyKey[:], verifyKey)
-	return signencrypt.NewDecodingReader(&xencKey, &xverifyKey, libkb.SignaturePrefixChatAttachment, nonce, r)
+	return signencrypt.NewDecodingReader(&xencKey, &xverifyKey, kbcrypto.SignaturePrefixChatAttachment, nonce, r)
 }

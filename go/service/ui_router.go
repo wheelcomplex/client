@@ -7,31 +7,12 @@ import (
 	"fmt"
 	"sync"
 
+	identify3 "github.com/keybase/client/go/identify3"
 	libkb "github.com/keybase/client/go/libkb"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/go-framed-msgpack-rpc/rpc"
 	context "golang.org/x/net/context"
 )
-
-type transporterAndConnectionID struct {
-	transporter  rpc.Transporter
-	connectionID libkb.ConnectionID
-}
-
-type getObj struct {
-	ui    libkb.UIKind
-	retCh chan<- transporterAndConnectionID
-}
-
-type uiWrapper struct {
-	cid       libkb.ConnectionID
-	sessionID int
-}
-
-type setObj struct {
-	cid libkb.ConnectionID
-	ui  libkb.UIKind
-}
 
 type UIRouter struct {
 	sync.Mutex
@@ -71,6 +52,18 @@ func (u *UIRouter) getUI(k libkb.UIKind) (rpc.Transporter, libkb.ConnectionID) {
 	return ret, cid
 }
 
+func (u *UIRouter) DumpUIs() map[libkb.UIKind]libkb.ConnectionID {
+	u.Lock()
+	defer u.Unlock()
+
+	// Copy the map
+	res := map[libkb.UIKind]libkb.ConnectionID{}
+	for k, v := range u.uis {
+		res[k] = v
+	}
+	return res
+}
+
 func (u *UIRouter) GetIdentifyUI() (libkb.IdentifyUI, error) {
 	x, _ := u.getUI(libkb.IdentifyUIKind)
 	if x == nil {
@@ -92,6 +85,36 @@ func (u *UIRouter) GetIdentifyUI() (libkb.IdentifyUI, error) {
 		Contextified: libkb.NewContextified(u.G()),
 	}
 	return ret, nil
+}
+
+func (u *UIRouter) GetIdentify3UI(m libkb.MetaContext) (keybase1.Identify3UiInterface, error) {
+	x, _ := u.getUI(libkb.Identify3UIKind)
+	if x == nil {
+		return nil, nil
+	}
+	cli := rpc.NewClient(x, libkb.NewContextifiedErrorUnwrapper(m.G()), nil)
+	id3cli := keybase1.Identify3UiClient{Cli: cli}
+	return id3cli, nil
+}
+
+func (u *UIRouter) GetIdentify3UIAdapter(m libkb.MetaContext) (libkb.IdentifyUI, error) {
+	id3i, err := u.GetIdentify3UI(m)
+	if err != nil {
+		return nil, err
+	}
+	if id3i == nil {
+		return nil, nil
+	}
+	return identify3.NewUIAdapterMakeSessionForUpcall(m, id3i)
+}
+
+func (u *UIRouter) GetChatUI() (libkb.ChatUI, error) {
+	x, _ := u.getUI(libkb.ChatUIKind)
+	if x == nil {
+		return nil, nil
+	}
+	cli := rpc.NewClient(x, libkb.NewContextifiedErrorUnwrapper(u.G()), nil)
+	return NewRemoteChatUI(0, cli), nil
 }
 
 func (u *UIRouter) GetIdentifyUICtx(ctx context.Context) (int, libkb.IdentifyUI, error) {

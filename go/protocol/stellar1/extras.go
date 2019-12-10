@@ -11,6 +11,24 @@ const (
 	KeybaseTransactionIDLen       = 16
 	KeybaseTransactionIDSuffix    = 0x30
 	KeybaseTransactionIDSuffixHex = "30"
+
+	KeybaseRequestIDLen       = 16
+	KeybaseRequestIDSuffix    = 0x31
+	KeybaseRequestIDSuffixHex = "31"
+)
+
+const (
+	PushAutoClaim           = "stellar.autoclaim"
+	PushPaymentStatus       = "stellar.payment_status"
+	PushPaymentNotification = "stellar.payment_notification"
+	PushRequestStatus       = "stellar.request_status"
+	PushAccountChange       = "stellar.account_change"
+)
+
+const (
+	AirdropQualified   = "qualified"
+	AirdropUnqualified = "unqualified"
+	AirdropAccepted    = "accepted"
 )
 
 func KeybaseTransactionIDFromString(s string) (KeybaseTransactionID, error) {
@@ -32,12 +50,39 @@ func (k KeybaseTransactionID) Eq(b KeybaseTransactionID) bool {
 	return k == b
 }
 
+func (k KeybaseTransactionID) IsNil() bool {
+	return len(k) == 0
+}
+
+func TransactionIDFromPaymentID(p PaymentID) TransactionID {
+	return TransactionID(p)
+}
+
 func (t TransactionID) String() string {
 	return string(t)
 }
 
 func (t TransactionID) Eq(b TransactionID) bool {
 	return t == b
+}
+
+func KeybaseRequestIDFromString(s string) (KeybaseRequestID, error) {
+	if len(s) != hex.EncodedLen(KeybaseRequestIDLen) {
+		return "", fmt.Errorf("bad KeybaseRequestID %q: must be %d bytes long", s, KeybaseRequestIDLen)
+	}
+	suffix := s[len(s)-2:]
+	if suffix != KeybaseRequestIDSuffixHex {
+		return "", fmt.Errorf("bad KeybaseRequestID %q: must end in 0x%x", s, KeybaseRequestIDSuffix)
+	}
+	return KeybaseRequestID(s), nil
+}
+
+func (k KeybaseRequestID) String() string {
+	return string(k)
+}
+
+func (k KeybaseRequestID) Eq(b KeybaseRequestID) bool {
+	return k == b
 }
 
 func ToTimeMs(t time.Time) TimeMs {
@@ -87,13 +132,16 @@ func (s SecretKey) SecureNoLogString() string {
 	return string(s)
 }
 
-// CheckInvariants checks that the bundle satisfies
+// CheckInvariants checks that the Bundle satisfies
 // 1. No duplicate account IDs
-// 2. At most one primary account
-func (s Bundle) CheckInvariants() error {
+// 2. Exactly one primary account
+// 3. Non-negative revision numbers
+// 4. Account Bundle accountIDs are consistent
+// 5. every account in AccountBundles is also in Accounts
+func (r Bundle) CheckInvariants() error {
 	accountIDs := make(map[AccountID]bool)
 	var foundPrimary bool
-	for _, entry := range s.Accounts {
+	for _, entry := range r.Accounts {
 		_, found := accountIDs[entry.AccountID]
 		if found {
 			return fmt.Errorf("duplicate account ID: %v", entry.AccountID)
@@ -108,9 +156,29 @@ func (s Bundle) CheckInvariants() error {
 		if entry.Mode == AccountMode_NONE {
 			return errors.New("account missing mode")
 		}
+		if entry.AcctBundleRevision < 1 {
+			return fmt.Errorf("account bundle revision %v < 1 for %v", entry.AcctBundleRevision, entry.AccountID)
+		}
 	}
-	if s.Revision < 1 {
-		return fmt.Errorf("revision %v < 1", s.Revision)
+	if !foundPrimary {
+		return errors.New("missing primary account")
+	}
+	if r.Revision < 1 {
+		return fmt.Errorf("revision %v < 1", r.Revision)
+	}
+	for accID, accBundle := range r.AccountBundles {
+		if accID != accBundle.AccountID {
+			return fmt.Errorf("account ID mismatch in bundle for %v", accID)
+		}
+		var AccountBundleInAccounts bool
+		for _, accountListAccount := range r.Accounts {
+			if accountListAccount.AccountID == accID {
+				AccountBundleInAccounts = true
+			}
+		}
+		if !AccountBundleInAccounts {
+			return fmt.Errorf("account in AccountBundles not in Accounts %v", accID)
+		}
 	}
 	return nil
 }
@@ -124,15 +192,34 @@ func (s Bundle) PrimaryAccount() (BundleEntry, error) {
 	return BundleEntry{}, errors.New("primary stellar account not found")
 }
 
-// Eq compares assets strictly.
-// Assets are not Eq if their type is different
-//   even if they have the same code and issuer.
-func (a Asset) Eq(b Asset) bool {
-	return a == b
+func (s Bundle) Lookup(acctID AccountID) (BundleEntry, error) {
+	for _, entry := range s.Accounts {
+		if entry.AccountID == acctID {
+			return entry, nil
+		}
+	}
+	return BundleEntry{}, errors.New("stellar account not found")
+}
+
+func (a Asset) SameAsset(b Asset) bool {
+	return a.Type == b.Type && a.Code == b.Code && a.Issuer == b.Issuer
 }
 
 func (a *Asset) IsNativeXLM() bool {
 	return a.Type == "native"
+}
+
+func (a *Asset) IsEmpty() bool {
+	return (a == nil) || (*a == Asset{})
+}
+
+// String returns a display friendly form of the asset, compatible with
+// xdr.Asset fomat: type/code/issuer or just "native" if asset is native XLM.
+func (a Asset) String() string {
+	if a.Type == "native" {
+		return a.Type
+	}
+	return fmt.Sprintf("%s/%s/%s", a.Type, a.Code, a.Issuer)
 }
 
 func AssetNative() Asset {
@@ -140,6 +227,16 @@ func AssetNative() Asset {
 		Type:   "native",
 		Code:   "",
 		Issuer: "",
+	}
+}
+
+func CreateNonNativeAssetType(code string) (string, error) {
+	if len(code) >= 1 && len(code) <= 4 {
+		return "credit_alphanum4", nil
+	} else if len(code) >= 5 && len(code) <= 12 {
+		return "credit_alphanum12", nil
+	} else {
+		return "", fmt.Errorf("Invalid asset code: %q", code)
 	}
 }
 
@@ -176,9 +273,17 @@ func (t TransactionStatus) Details(errMsg string) (status, detail string) {
 
 func NewPaymentLocal(txid TransactionID, ctime TimeMs) *PaymentLocal {
 	return &PaymentLocal{
-		Id:   txid,
+		Id:   NewPaymentID(txid),
 		Time: ctime,
 	}
+}
+
+func NewPaymentID(txid TransactionID) PaymentID {
+	return PaymentID(txid)
+}
+
+func (p PaymentID) String() string {
+	return string(p)
 }
 
 func (p *PaymentSummary) ToDetails() *PaymentDetails {
@@ -208,6 +313,35 @@ func (p *PaymentSummary) TransactionID() (TransactionID, error) {
 	return "", errors.New("unknown payment summary type")
 }
 
+func (p *PaymentSummary) TransactionStatus() (TransactionStatus, error) {
+	t, err := p.Typ()
+	if err != nil {
+		return TransactionStatus_NONE, err
+	}
+
+	switch t {
+	case PaymentSummaryType_STELLAR:
+		return TransactionStatus_SUCCESS, nil
+	case PaymentSummaryType_DIRECT:
+		return p.Direct().TxStatus, nil
+	case PaymentSummaryType_RELAY:
+		return p.Relay().TxStatus, nil
+	}
+
+	return TransactionStatus_NONE, errors.New("unknown payment summary type")
+}
+
+func (c *ClaimSummary) ToPaymentStatus() PaymentStatus {
+	txStatus := c.TxStatus.ToPaymentStatus()
+	switch txStatus {
+	case PaymentStatus_COMPLETED:
+		if c.Dir == RelayDirection_YANK {
+			return PaymentStatus_CANCELED
+		}
+	}
+	return txStatus
+}
+
 func (d *StellarServerDefinitions) GetCurrencyLocal(code OutsideCurrencyCode) (res CurrencyLocal, ok bool) {
 	def, found := d.Currencies[code]
 	if found {
@@ -229,4 +363,62 @@ func (d *StellarServerDefinitions) GetCurrencyLocal(code OutsideCurrencyCode) (r
 
 func (c OutsideCurrencyCode) String() string {
 	return string(c)
+}
+
+func (b BuildPaymentID) String() string {
+	return string(b)
+}
+
+func (b BuildPaymentID) IsNil() bool {
+	return len(b) == 0
+}
+
+func (b BuildPaymentID) Eq(other BuildPaymentID) bool {
+	return b == other
+}
+
+func NewChatConversationID(b []byte) *ChatConversationID {
+	cid := ChatConversationID(hex.EncodeToString(b))
+	return &cid
+}
+
+func (a *AccountDetails) SetDefaultDisplayCurrency() {
+	if a.DisplayCurrency == "" {
+		a.DisplayCurrency = "USD"
+	}
+}
+
+func (a AssetCode) String() string {
+	return string(a)
+}
+
+func (a AssetCode) Eq(other AssetCode) bool {
+	return a == other
+}
+
+func (a AssetCode) GetAssetType() string {
+	switch {
+	case len(a) >= 1 && len(a) <= 4:
+		return "credit_alphanum4"
+	case len(a) >= 5 && len(a) <= 12:
+		return "credit_alphanum12"
+	default:
+		// nil or invalid AssetCode.
+		return "asset_code_invalid"
+	}
+}
+
+// TypeString implements stellarnet.AssetBase.
+func (a Asset) TypeString() string {
+	return a.Type
+}
+
+// CodeString implements stellarnet.AssetBase.
+func (a Asset) CodeString() string {
+	return a.Code
+}
+
+// IssuerString implements stellarnet.AssetBase.
+func (a Asset) IssuerString() string {
+	return a.Issuer
 }

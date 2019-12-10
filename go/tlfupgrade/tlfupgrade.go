@@ -25,9 +25,10 @@ type BackgroundTLFUpdater struct {
 	running     bool
 
 	// testing
-	testingAPIServer  libkb.API
-	testingChatHelper libkb.ChatHelper
-	upgradeCh         *chan keybase1.TLFID
+	testingAPIServer   libkb.API
+	testingChatHelper  libkb.ChatHelper
+	testingDisableKBFS bool
+	upgradeCh          *chan keybase1.TLFID
 }
 
 func NewBackgroundTLFUpdater(g *libkb.GlobalContext) *BackgroundTLFUpdater {
@@ -39,7 +40,7 @@ func NewBackgroundTLFUpdater(g *libkb.GlobalContext) *BackgroundTLFUpdater {
 		shutdownCh:   make(chan struct{}),
 		clock:        clockwork.NewRealClock(),
 	}
-	g.PushShutdownHook(func() error { return b.Shutdown() })
+	g.PushShutdownHook(b.Shutdown)
 	return b
 }
 
@@ -79,14 +80,17 @@ func (b *BackgroundTLFUpdater) runAll() {
 		b.shutdownCh = make(chan struct{})
 		b.running = true
 		go b.runAppType(keybase1.TeamApplication_CHAT)
+		if !b.testingDisableKBFS {
+			go b.runAppType(keybase1.TeamApplication_KBFS)
+		}
 	}
 }
 
-func (b *BackgroundTLFUpdater) Shutdown() error {
+func (b *BackgroundTLFUpdater) Shutdown(mctx libkb.MetaContext) error {
 	b.Lock()
 	defer b.Unlock()
 	if b.running {
-		b.debug(context.Background(), "shutting down")
+		b.debug(mctx.Ctx(), "shutting down")
 		b.running = false
 		close(b.shutdownCh)
 	}
@@ -94,18 +98,20 @@ func (b *BackgroundTLFUpdater) Shutdown() error {
 }
 
 func (b *BackgroundTLFUpdater) monitorAppState() {
-	ctx := context.Background()
-	b.debug(ctx, "monitorAppState: starting up")
-	state := keybase1.AppState_FOREGROUND
+	mctx := libkb.NewMetaContextBackground(b.G())
+	b.debug(mctx.Ctx(), "monitorAppState: starting up")
+	state := keybase1.MobileAppState_FOREGROUND
 	for {
-		state = <-b.G().AppState.NextUpdate(&state)
+		state = <-b.G().MobileAppState.NextUpdate(&state)
 		switch state {
-		case keybase1.AppState_FOREGROUND:
-			b.debug(ctx, "monitorAppState: foregrounded, running all after: %v", b.initialWait)
+		case keybase1.MobileAppState_FOREGROUND:
+			b.debug(mctx.Ctx(), "monitorAppState: foregrounded, running all after: %v", b.initialWait)
 			b.runAll()
-		case keybase1.AppState_BACKGROUND:
-			b.debug(ctx, "monitorAppState: backgrounded, suspending upgrade thread")
-			b.Shutdown()
+		case keybase1.MobileAppState_BACKGROUND:
+			b.debug(mctx.Ctx(), "monitorAppState: backgrounded, suspending upgrade thread")
+			if err := b.Shutdown(mctx); err != nil {
+				b.debug(mctx.Ctx(), "unable to shut down %v", err)
+			}
 		}
 	}
 }
@@ -144,12 +150,16 @@ func (b *BackgroundTLFUpdater) deadline(d time.Duration) time.Time {
 }
 
 func (b *BackgroundTLFUpdater) getTLFToUpgrade(ctx context.Context, appType keybase1.TeamApplication) (*GetTLFForUpgradeAvailableRes, time.Time) {
-	arg := libkb.NewAPIArgWithNetContext(ctx, "kbfs/upgrade")
+	mctx := libkb.NewMetaContext(ctx, b.G())
+	if !b.G().ActiveDevice.HaveKeys() {
+		return nil, time.Now().Add(time.Minute)
+	}
+	arg := libkb.NewAPIArg("kbfs/upgrade")
 	arg.Args = libkb.NewHTTPArgs()
 	arg.SessionType = libkb.APISessionTypeREQUIRED
 	arg.Args.Add("app_type", libkb.I{Val: int(appType)})
 	var res getUpgradeRes
-	if err := b.api().GetDecode(arg, &res); err != nil {
+	if err := b.api().GetDecode(mctx, arg, &res); err != nil {
 		b.debug(ctx, "getTLFToUpgrade: API fail: %s", err)
 		return nil, b.deadline(b.errWait)
 	}
@@ -183,6 +193,10 @@ func (b *BackgroundTLFUpdater) upgradeTLF(ctx context.Context, tlfName string, t
 	switch appType {
 	case keybase1.TeamApplication_CHAT:
 		b.upgradeTLFForChat(ctx, tlfName, tlfID, public)
+	case keybase1.TeamApplication_KBFS:
+		if err := UpgradeTLFForKBFS(ctx, b.G(), tlfName, public); err != nil {
+			b.debug(ctx, "upgradeTLF: KBFS upgrade failed: %s", err)
+		}
 	default:
 		b.debug(ctx, "upgradeTLF: unknown app type: %v", appType)
 	}
@@ -190,14 +204,18 @@ func (b *BackgroundTLFUpdater) upgradeTLF(ctx context.Context, tlfName string, t
 
 func (b *BackgroundTLFUpdater) upgradeTLFForChat(ctx context.Context, tlfName string, tlfID keybase1.TLFID,
 	public bool) {
+	defer func() {
+		if b.upgradeCh != nil {
+			*b.upgradeCh <- tlfID
+		}
+	}()
 	chatTLFID, err := chat1.MakeTLFID(tlfID.String())
 	if err != nil {
 		b.debug(ctx, "upgradeTLFForChat: invalid TLFID: %s", err)
+		return
 	}
 	if err := b.chat().UpgradeKBFSToImpteam(ctx, tlfName, chatTLFID, public); err != nil {
 		b.debug(ctx, "upgradeTLFForChat: failed to upgrade TLFID for chat: tlfID: %v err: %s", tlfID, err)
-	}
-	if b.upgradeCh != nil {
-		*b.upgradeCh <- tlfID
+		return
 	}
 }

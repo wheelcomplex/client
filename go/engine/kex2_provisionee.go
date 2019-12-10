@@ -10,9 +10,11 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/keybase/client/go/kbcrypto"
 	"github.com/keybase/client/go/kex2"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/logger"
+	"github.com/keybase/client/go/msgpack"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 	"github.com/keybase/go-framed-msgpack-rpc/rpc"
 	jsonw "github.com/keybase/go-jsonw"
@@ -27,7 +29,6 @@ type Kex2Provisionee struct {
 	secretCh     chan kex2.Secret
 	eddsa        libkb.NaclKeyPair
 	dh           libkb.NaclKeyPair
-	deviceEKSeed keybase1.Bytes32
 	uid          keybase1.UID
 	username     string
 	sessionToken keybase1.SessionToken
@@ -37,23 +38,26 @@ type Kex2Provisionee struct {
 	kex2Cancel   func()
 	mctx         libkb.MetaContext
 	salt         []byte
-	v1Only       bool // only support protocol v1 (for testing)
+	ekReboxer    *ephemeralKeyReboxer
+	expectedUID  keybase1.UID
 }
 
 // Kex2Provisionee implements kex2.Provisionee, libkb.UserBasic,
-// and libkb.SessionReader interfaces.
+// and libkb.APITokener interfaces.
 var _ kex2.Provisionee = (*Kex2Provisionee)(nil)
 var _ libkb.UserBasic = (*Kex2Provisionee)(nil)
-var _ libkb.SessionReader = (*Kex2Provisionee)(nil)
+var _ libkb.APITokener = (*Kex2Provisionee)(nil)
 
 // NewKex2Provisionee creates a Kex2Provisionee engine.
-func NewKex2Provisionee(g *libkb.GlobalContext, device *libkb.Device, secret kex2.Secret, salt []byte) *Kex2Provisionee {
+func NewKex2Provisionee(g *libkb.GlobalContext, device *libkb.Device, secret kex2.Secret,
+	expectedUID keybase1.UID, salt []byte) *Kex2Provisionee {
 	return &Kex2Provisionee{
 		Contextified: libkb.NewContextified(g),
 		device:       device,
 		secret:       secret,
 		secretCh:     make(chan kex2.Secret),
 		salt:         salt,
+		expectedUID:  expectedUID,
 	}
 }
 
@@ -126,7 +130,7 @@ func (e *Kex2Provisionee) Run(m libkb.MetaContext) error {
 	karg := kex2.KexBaseArg{
 		Ctx:           m.Ctx(),
 		LogCtx:        newKex2LogContext(m.G()),
-		Mr:            libkb.NewKexRouter(m.G()),
+		Mr:            libkb.NewKexRouter(m),
 		DeviceID:      e.device.ID,
 		Secret:        e.secret,
 		SecretChannel: e.secretCh,
@@ -161,7 +165,7 @@ func (e *Kex2Provisionee) GetLogFactory() rpc.LogFactory {
 // HandleHello implements HandleHello in kex2.Provisionee.
 func (e *Kex2Provisionee) HandleHello(_ context.Context, harg keybase1.HelloArg) (res keybase1.HelloRes, err error) {
 	m := e.mctx
-	defer m.CTrace("Kex2Provisionee#HandleHello", func() error { return err })()
+	defer m.Trace("Kex2Provisionee#HandleHello", func() error { return err })()
 	e.pps = harg.Pps
 	res, err = e.handleHello(m, harg.Uid, harg.Token, harg.Csrf, harg.SigBody)
 	return res, err
@@ -185,6 +189,12 @@ func (e *Kex2Provisionee) handleHello(m libkb.MetaContext, uid keybase1.UID, tok
 		return res, err
 	}
 
+	if e.uid != e.expectedUID {
+		m.Debug("Unexpected UID in handleHello: wanted %s, got: %s", e.expectedUID, e.uid)
+		m.Debug("Username from the signature is: %q", e.username)
+		return res, fmt.Errorf("Provisioner is a different user than we wanted.")
+	}
+
 	e.eddsa, err = libkb.GenerateNaclSigningKeyPair()
 	if err != nil {
 		return res, err
@@ -195,13 +205,7 @@ func (e *Kex2Provisionee) handleHello(m libkb.MetaContext, uid keybase1.UID, tok
 		return res, err
 	}
 
-	ekLib := e.G().GetEKLib()
-	if ekLib != nil {
-		e.deviceEKSeed, err = ekLib.NewEphemeralSeed()
-		if err != nil {
-			return res, err
-		}
-	}
+	e.ekReboxer = newEphemeralKeyReboxer()
 
 	if err = e.addDeviceSibkey(m, jw); err != nil {
 		return res, err
@@ -222,7 +226,7 @@ func (e *Kex2Provisionee) handleHello(m libkb.MetaContext, uid keybase1.UID, tok
 // HandleHello2 implements HandleHello2 in kex2.Provisionee.
 func (e *Kex2Provisionee) HandleHello2(_ context.Context, harg keybase1.Hello2Arg) (res keybase1.Hello2Res, err error) {
 	m := e.mctx
-	defer m.CTrace("Kex2Provisionee#HandleHello2()", func() error { return err })()
+	defer m.Trace("Kex2Provisionee#HandleHello2()", func() error { return err })()
 	var res1 keybase1.HelloRes
 	res1, err = e.handleHello(m, harg.Uid, harg.Token, harg.Csrf, harg.SigBody)
 	if err != nil {
@@ -230,26 +234,25 @@ func (e *Kex2Provisionee) HandleHello2(_ context.Context, harg keybase1.Hello2Ar
 	}
 	res.SigPayload = res1
 	res.EncryptionKey = e.dh.GetKID()
-	ekLib := e.G().GetEKLib()
-	if ekLib != nil {
-		ekPair := ekLib.DeriveDeviceDHKey(e.deviceEKSeed)
-		res.DeviceEkKID = ekPair.GetKID()
+	res.DeviceEkKID, err = e.ekReboxer.getDeviceEKKID(m)
+	if err != nil {
+		return res, err
 	}
 	return res, err
 }
 
 func (e *Kex2Provisionee) HandleDidCounterSign2(_ context.Context, arg keybase1.DidCounterSign2Arg) (err error) {
 	mctx := e.mctx
-	defer mctx.CTrace("Kex2Provisionee#HandleDidCounterSign2()", func() error { return err })()
+	defer mctx.Trace("Kex2Provisionee#HandleDidCounterSign2()", func() error { return err })()
 	var ppsBytes []byte
 	ppsBytes, _, err = e.dh.DecryptFromString(arg.PpsEncrypted)
 	if err != nil {
-		mctx.CDebugf("| Failed to decrypt pps: %s", err)
+		mctx.Debug("| Failed to decrypt pps: %s", err)
 		return err
 	}
-	err = libkb.MsgpackDecode(&e.pps, ppsBytes)
+	err = msgpack.Decode(&e.pps, ppsBytes)
 	if err != nil {
-		mctx.CDebugf("| Failed to unpack pps: %s", err)
+		mctx.Debug("| Failed to unpack pps: %s", err)
 		return err
 	}
 	return e.handleDidCounterSign(mctx, arg.Sig, arg.PukBox, arg.UserEkBox)
@@ -263,14 +266,19 @@ func (e *Kex2Provisionee) HandleDidCounterSign(_ context.Context, sig []byte) (e
 
 func (e *Kex2Provisionee) handleDidCounterSign(m libkb.MetaContext, sig []byte, perUserKeyBox *keybase1.PerUserKeyBox, userEKBox *keybase1.UserEkBoxed) (err error) {
 
-	defer m.CTrace("Kex2Provisionee#handleDidCounterSign()", func() error { return err })()
+	defer m.Trace("Kex2Provisionee#handleDidCounterSign()", func() error { return err })()
 
 	// load self user (to load merkle root)
-	m.CDebugf("| running for username %s", e.username)
+	m.Debug("| running for username %s", e.username)
 	loadArg := libkb.NewLoadUserArgWithMetaContext(m).WithName(e.username)
-	_, err = libkb.LoadUser(loadArg)
+	var me *libkb.User
+	me, err = libkb.LoadUser(loadArg)
 	if err != nil {
 		return err
+	}
+	uv := me.ToUserVersion()
+	if !uv.Uid.Equal(e.uid) {
+		return fmt.Errorf("Wrong user for key exchange: %v != %v", uv.Uid, e.uid)
 	}
 
 	// decode sig
@@ -296,8 +304,7 @@ func (e *Kex2Provisionee) handleDidCounterSign(m libkb.MetaContext, sig []byte, 
 	}
 
 	// logged in, so update our temporary session to say so
-	err = e.updateTemporarySession(m)
-	if err != nil {
+	if err = e.updateTemporarySession(m, uv); err != nil {
 		return err
 	}
 
@@ -311,36 +318,48 @@ func (e *Kex2Provisionee) handleDidCounterSign(m libkb.MetaContext, sig []byte, 
 		return err
 	}
 
-	// Finish the ephemeral key generation -- create a deviceEKStatement and
-	// prepare the boxMetadata for posting if we received a valid userEKBox
-	deviceEKStatement, deviceEKStatementSig, userEKBoxMetadata, err := e.ephemeralKeygen(m, userEKBox)
-	if err != nil {
-		return err
-	}
+	if err := retryOnEphemeralRace(m, func(m libkb.MetaContext) error {
+		// Finish the ephemeral key generation -- create a deviceEKStatement and
+		// prepare the boxMetadata for posting if we received a valid userEKBox
+		reboxArg, err := e.ekReboxer.getReboxArg(m, userEKBox, e.device.ID, e.eddsa)
+		if err != nil {
+			return err
+		}
 
-	// post the key sigs to the api server
-	if err = e.postSigs(eddsaArgs, dhArgs, perUserKeyBox, userEKBoxMetadata, deviceEKStatementSig); err != nil {
+		// post the key sigs to the api server
+		if err = e.postSigs(eddsaArgs, dhArgs, perUserKeyBox, reboxArg); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 
 	// update the global active device, and also store the device keys in memory under ActiveDevice
-	if err = e.saveConfig(m); err != nil {
+	if err = e.saveConfig(m, uv); err != nil {
 		return err
 	}
 
-	// store the ephemeralkeys, if any. If this fails after we have posted the
-	// client will no not have access to the userEK it was just reboxed for
-	// unfortunately. Without any EKs, the normal generation machinery will
-	// take over and they will make a new userEK
-	return e.storeEKs(m, deviceEKStatement, userEKBox)
+	// Store the ephemeralkeys, if any. If this fails after we have
+	// posted the client will not have access to the userEK it was
+	// just reboxed for unfortunately. Without any EKs, the normal
+	// generation machinery will take over and they will make a new
+	// userEK.
+	if err := e.ekReboxer.storeEKs(m); err != nil {
+		// Swallow the error - provisioning has already happened and
+		// we've already save the config, there's no going back.
+		m.Debug("Unable to store EKs: %s", err)
+	}
+
+	return nil
 }
 
 // updateTemporarySession commits the session token and csrf token to our temporary session,
 // stored in our provisional login context. We'll need that to post successfully.
-func (e *Kex2Provisionee) updateTemporarySession(m libkb.MetaContext) (err error) {
-	defer m.CTrace("Kex2Provisionee#updateTemporarySession", func() error { return err })()
-	m.CDebugf("login context: %T %+v", m.LoginContext(), m.LoginContext())
-	return m.LoginContext().SaveState(string(e.sessionToken), string(e.csrfToken), libkb.NewNormalizedUsername(e.username), e.uid, e.device.ID)
+func (e *Kex2Provisionee) updateTemporarySession(m libkb.MetaContext, uv keybase1.UserVersion) (err error) {
+	defer m.Trace("Kex2Provisionee#updateTemporarySession", func() error { return err })()
+	m.Debug("login context: %T %+v", m.LoginContext(), m.LoginContext())
+	return m.LoginContext().SaveState(string(e.sessionToken), string(e.csrfToken), libkb.NewNormalizedUsername(e.username), uv, e.device.ID)
 }
 
 type decodedSig struct {
@@ -356,20 +375,16 @@ func (e *Kex2Provisionee) decodeSig(sig []byte) (*decodedSig, error) {
 	if err != nil {
 		return nil, err
 	}
-	packet, err := libkb.DecodePacket(body)
+	naclSig, err := kbcrypto.DecodeNaclSigInfoPacket(body)
 	if err != nil {
 		return nil, err
-	}
-	naclSig, ok := packet.Body.(*libkb.NaclSigInfo)
-	if !ok {
-		return nil, libkb.UnmarshalError{T: "Nacl signature"}
 	}
 	jw, err := jsonw.Unmarshal(naclSig.Payload)
 	if err != nil {
 		return nil, err
 	}
 	res := decodedSig{
-		sigID:  libkb.ComputeSigIDFromSigBody(body),
+		sigID:  kbcrypto.ComputeSigIDFromSigBody(body),
 		linkID: libkb.ComputeLinkID(naclSig.Payload),
 	}
 	res.seqno, err = jw.AtKey("seqno").GetInt()
@@ -400,27 +415,11 @@ func (e *Kex2Provisionee) GetUID() keybase1.UID {
 	return e.uid
 }
 
-// APIArgs implements libkb.SessionReader interface.
-func (e *Kex2Provisionee) APIArgs() (token, csrf string) {
+// Tokens implements the APITokener interface. This is the only implementer, but it's
+// a pretty unusual case --- the provisioned device is giving us, the provisionee,
+// a session and CSRF token to use for the server.
+func (e *Kex2Provisionee) Tokens() (token, csrf string) {
 	return string(e.sessionToken), string(e.csrfToken)
-}
-
-// Invalidate implements libkb.SessionReader interface.
-func (e *Kex2Provisionee) Invalidate() {
-	e.sessionToken = ""
-	e.csrfToken = ""
-}
-
-// IsLoggedIn implements libkb.SessionReader interface.  For the
-// sake of kex2 provisionee, we are logged in because we have a
-// session token.
-func (e *Kex2Provisionee) IsLoggedIn() bool {
-	return true
-}
-
-// Logout implements libkb.SessionReader interface.  Noop.
-func (e *Kex2Provisionee) Logout() error {
-	return nil
 }
 
 // Device returns the new device struct.
@@ -435,8 +434,8 @@ func (e *Kex2Provisionee) addDeviceSibkey(m libkb.MetaContext, jw *jsonw.Wrapper
 		// starting this engine, but leaving the code here just
 		// as a safety measure.
 
-		m.CDebugf("kex2 provisionee: device name (e.device.Description) is nil. It should be set by caller.")
-		m.CDebugf("kex2 provisionee: proceeding to prompt user for device name, but figure out how this happened...")
+		m.Debug("kex2 provisionee: device name (e.device.Description) is nil. It should be set by caller.")
+		m.Debug("kex2 provisionee: proceeding to prompt user for device name, but figure out how this happened...")
 
 		// need user to get existing device names
 		loadArg := libkb.NewLoadUserArgWithMetaContext(m).WithName(e.username)
@@ -446,7 +445,7 @@ func (e *Kex2Provisionee) addDeviceSibkey(m libkb.MetaContext, jw *jsonw.Wrapper
 		}
 		existingDevices, err := user.DeviceNames()
 		if err != nil {
-			m.CDebugf("proceeding despite error getting existing device names: %s", err)
+			m.Debug("proceeding despite error getting existing device names: %s", err)
 		}
 
 		e.G().Log.Debug("kex2 provisionee: prompting for device name")
@@ -458,7 +457,7 @@ func (e *Kex2Provisionee) addDeviceSibkey(m libkb.MetaContext, jw *jsonw.Wrapper
 			return err
 		}
 		e.device.Description = &name
-		m.CDebugf("kex2 provisionee: got device name: %q", name)
+		m.Debug("kex2 provisionee: got device name: %q", name)
 	}
 
 	s := libkb.DeviceStatusActive
@@ -468,7 +467,10 @@ func (e *Kex2Provisionee) addDeviceSibkey(m libkb.MetaContext, jw *jsonw.Wrapper
 	if err != nil {
 		return err
 	}
-	jw.SetValueAtPath("body.device", dw)
+	err = jw.SetValueAtPath("body.device", dw)
+	if err != nil {
+		return err
+	}
 
 	return jw.SetValueAtPath("body.sibkey.kid", jsonw.NewString(e.eddsa.GetKID().String()))
 }
@@ -490,8 +492,8 @@ func (e *Kex2Provisionee) reverseSig(jw *jsonw.Wrapper) error {
 
 // postSigs takes the HTTP args for the signing key and encrypt
 // key and posts them to the api server.
-func (e *Kex2Provisionee) postSigs(signingArgs, encryptArgs *libkb.HTTPArgs, perUserKeyBox *keybase1.PerUserKeyBox,
-	userEKBoxMetadata *keybase1.UserEkBoxMetadata, deviceEKStatementSig string) error {
+func (e *Kex2Provisionee) postSigs(signingArgs, encryptArgs *libkb.HTTPArgs,
+	perUserKeyBox *keybase1.PerUserKeyBox, reboxArg *keybase1.UserEkReboxArg) error {
 	payload := make(libkb.JSONPayload)
 	payload["sigs"] = []map[string]string{firstValues(signingArgs.ToValues()), firstValues(encryptArgs.ToValues())}
 
@@ -500,19 +502,17 @@ func (e *Kex2Provisionee) postSigs(signingArgs, encryptArgs *libkb.HTTPArgs, per
 		libkb.AddPerUserKeyServerArg(payload, perUserKeyBox.Generation, []keybase1.PerUserKeyBox{*perUserKeyBox}, nil)
 	}
 
-	if userEKBoxMetadata != nil { // if we don't have a userEKBox, we won't make a deviceEKStatement
-		payload["device_eks"] = map[string]string{string(e.device.ID): deviceEKStatementSig}
-		payload["user_ek_rebox"] = *userEKBoxMetadata
-	}
+	libkb.AddUserEKReBoxServerArg(payload, reboxArg)
 
+	mctx := e.mctx.WithAPITokener(e)
 	arg := libkb.APIArg{
 		Endpoint:    "key/multi",
 		SessionType: libkb.APISessionTypeREQUIRED,
 		JSONPayload: payload,
-		SessionR:    e,
 	}
+	// MerkleCheckPostedUserSig was not added here. Changing kex2 is risky and there's no obvious attack.
 
-	_, err := e.G().API.PostJSON(arg)
+	_, err := e.G().API.PostJSON(mctx, arg)
 	return err
 }
 
@@ -565,13 +565,16 @@ func (e *Kex2Provisionee) dhKeyProof(m libkb.MetaContext, dh libkb.GenericKey, e
 }
 
 func (e *Kex2Provisionee) pushLKSServerHalf(m libkb.MetaContext) (err error) {
-	defer m.CTrace("Kex2Provisionee#pushLKSServerHalf", func() error { return err })()
+	defer m.Trace("Kex2Provisionee#pushLKSServerHalf", func() error { return err })()
 
 	// make new lks
 	ppstream := libkb.NewPassphraseStream(e.pps.PassphraseStream)
 	ppstream.SetGeneration(libkb.PassphraseGeneration(e.pps.Generation))
 	e.lks = libkb.NewLKSec(ppstream, e.uid)
-	e.lks.GenerateServerHalf()
+	err = e.lks.GenerateServerHalf()
+	if err != nil {
+		return err
+	}
 
 	// make client half recovery
 	chrKID := e.dh.GetKID()
@@ -580,15 +583,14 @@ func (e *Kex2Provisionee) pushLKSServerHalf(m libkb.MetaContext) (err error) {
 		return err
 	}
 
-	err = libkb.PostDeviceLKS(m, e, e.device.ID, e.device.Type, e.lks.GetServerHalf(), e.lks.Generation(), chrText, chrKID)
+	err = libkb.PostDeviceLKS(m.WithAPITokener(e), e.device.ID, e.device.Type, e.lks.GetServerHalf(), e.lks.Generation(), chrText, chrKID)
 	if err != nil {
 		return err
 	}
 
 	// Sync the LKS stuff back from the server, so that subsequent
 	// attempts to use public key login will work.
-	err = m.LoginContext().RunSecretSyncer(m, e.uid)
-	if err != nil {
+	if err = m.LoginContext().RunSecretSyncer(m, e.uid); err != nil {
 		return err
 	}
 
@@ -615,42 +617,9 @@ func (e *Kex2Provisionee) saveKeys(m libkb.MetaContext) error {
 	return nil
 }
 
-func (e *Kex2Provisionee) ephemeralKeygen(m libkb.MetaContext, userEKBox *keybase1.UserEkBoxed) (deviceEKStatement keybase1.DeviceEkStatement, deviceEKStatementSig string, userEKBoxMetadata *keybase1.UserEkBoxMetadata, err error) {
-	defer m.CTrace("ephemeralKeygen", func() error { return err })()
-
-	if userEKBox == nil { // We will create EKs after provisioning in the normal way
-		m.CDebugf("userEKBox nil, no ephemeral keys created during provisioning")
-		return deviceEKStatement, deviceEKStatementSig, nil, nil
-	}
-
-	ekLib := e.G().GetEKLib()
-	if ekLib == nil {
-		m.CDebugf("ekLib missing from G. Aborting ephemeralKeygen")
-		return deviceEKStatement, deviceEKStatementSig, nil, nil
-	}
-
-	signingKey, err := e.SigningKey()
-	if err != nil {
-		return deviceEKStatement, deviceEKStatementSig, nil, err
-	}
-
-	deviceEKStatement, deviceEKStatementSig, err = ekLib.SignedDeviceEKStatementFromSeed(m.Ctx(), userEKBox.DeviceEkGeneration, e.deviceEKSeed, signingKey, []keybase1.DeviceEkMetadata{})
-	if err != nil {
-		return deviceEKStatement, deviceEKStatementSig, nil, err
-	}
-
-	userEKBoxMetadata = &keybase1.UserEkBoxMetadata{
-		Box:                 userEKBox.Box,
-		RecipientDeviceID:   e.device.ID,
-		RecipientGeneration: userEKBox.DeviceEkGeneration,
-	}
-
-	return deviceEKStatement, deviceEKStatementSig, userEKBoxMetadata, err
-}
-
 // cacheKeys caches the device keys in the Account object.
-func (e *Kex2Provisionee) saveConfig(m libkb.MetaContext) (err error) {
-	defer m.CTrace("Kex2Provisionee#saveConfig", func() error { return err })()
+func (e *Kex2Provisionee) saveConfig(m libkb.MetaContext, uv keybase1.UserVersion) (err error) {
+	defer m.Trace("Kex2Provisionee#saveConfig", func() error { return err })()
 	if e.eddsa == nil {
 		return errors.New("cacheKeys called, but eddsa key is nil")
 	}
@@ -663,32 +632,7 @@ func (e *Kex2Provisionee) saveConfig(m libkb.MetaContext) (err error) {
 		deviceName = *e.device.Description
 	}
 
-	return m.SwitchUserNewConfigActiveDevice(e.uid, libkb.NewNormalizedUsername(e.username), e.salt, e.device.ID, e.eddsa, e.dh, deviceName)
-}
-
-func (e *Kex2Provisionee) storeEKs(m libkb.MetaContext, deviceEKStatement keybase1.DeviceEkStatement, userEKBox *keybase1.UserEkBoxed) (err error) {
-	defer m.CTrace("Kex2Provisionee.storeEKs", func() error { return err })()
-	ekLib := e.G().GetEKLib()
-	if ekLib == nil {
-		return nil
-	}
-	if userEKBox == nil {
-		m.CDebugf("userEKBox nil, no ephemeral keys to store")
-		return nil
-	}
-
-	deviceEKStorage := m.G().GetDeviceEKStorage()
-	metadata := deviceEKStatement.CurrentDeviceEkMetadata
-	err = deviceEKStorage.Put(m.Ctx(), metadata.Generation, keybase1.DeviceEk{
-		Seed:     e.deviceEKSeed,
-		Metadata: metadata,
-	})
-	if err != nil {
-		return err
-	}
-
-	userEKBoxStorage := m.G().GetUserEKBoxStorage()
-	return userEKBoxStorage.Put(m.Ctx(), userEKBox.Metadata.Generation, *userEKBox)
+	return m.SwitchUserNewConfigActiveDevice(uv, libkb.NewNormalizedUsername(e.username), e.salt, e.device.ID, e.eddsa, e.dh, deviceName, libkb.KeychainModeOS)
 }
 
 func (e *Kex2Provisionee) SigningKey() (libkb.GenericKey, error) {

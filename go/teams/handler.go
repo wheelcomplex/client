@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/keybase/client/go/engine"
+	"github.com/keybase/client/go/gregor"
 	"github.com/keybase/client/go/libkb"
 	"github.com/keybase/client/go/protocol/keybase1"
 )
@@ -33,21 +34,34 @@ func HandleRotateRequest(ctx context.Context, g *libkb.GlobalContext, msg keybas
 		return err == nil && role.IsOrAbove(keybase1.TeamRole_ADMIN)
 	}
 	if len(msg.ResetUsersUntrusted) > 0 && team.IsOpen() && isAdmin() {
-		if needRP, err := sweepOpenTeamResetAndDeletedMembers(ctx, g, team, msg.ResetUsersUntrusted); err == nil {
+		// NOTE: One day, this code path will be unused. Server should not
+		// issue CLKRs with ResetUsersUntrusted for open teams. Instead, there
+		// is a new work type to sweep reset users: OPENSWEEP. See
+		// `HandleOpenTeamSweepRequest`.
+
+		// Even though this is open team, and we are aiming to not rotate them,
+		// the server asked us specifically to do so with this CLKR. We have to
+		// obey, otherwise that CLKR will stay undone and server will keep
+		// asking users to rotate.
+		postedLink, err := sweepOpenTeamResetAndDeletedMembers(ctx, g, team, msg.ResetUsersUntrusted, true /* rotate */)
+		if err != nil {
+			g.Log.CDebugf(ctx, "Failed to sweep deleted members: %s", err)
+		} else {
 			// If sweepOpenTeamResetAndDeletedMembers does not do anything to
-			// the team, do not load team again later.
-			needTeamReload = needRP
+			// the team, do not load team again later. Otherwise, if new link
+			// was posted, we need to reload.
+			needTeamReload = postedLink
 		}
 
-		// * NOTE * Still call the regular rotate key routine even if
-		// sweep succeeds and posts link.
+		// * NOTE * Still call the regular rotate key routine even if sweep
+		// succeeds and posts link.
 
-		// In normal case, it will reload team, see that generation is
-		// higher than one requested in CLKR (because we rotated key
-		// during sweeping), and then bail out.
+		// In normal case, it will reload team, see that generation is higher
+		// than one requested in CLKR (because we rotated key during sweeping),
+		// and then bail out.
 	}
 
-	return RetryOnSigOldSeqnoError(ctx, g, func(ctx context.Context, _ int) error {
+	return RetryIfPossible(ctx, g, func(ctx context.Context, _ int) error {
 		if needTeamReload {
 			team2, err := Load(ctx, g, loadTeamArg)
 			if err != nil {
@@ -64,7 +78,13 @@ func HandleRotateRequest(ctx context.Context, g *libkb.GlobalContext, msg keybas
 		}
 
 		g.Log.CDebugf(ctx, "rotating team %s (%s)", team.Name(), teamID)
-		if err := team.Rotate(ctx); err != nil {
+
+		rotationType := keybase1.RotationType_CLKR
+		if teamID.IsPublic() {
+			rotationType = keybase1.RotationType_VISIBLE
+		}
+
+		if err := team.Rotate(ctx, rotationType); err != nil {
 			g.Log.CDebugf(ctx, "rotating team %s (%s) error: %s", team.Name(), teamID, err)
 			return err
 		}
@@ -74,12 +94,43 @@ func HandleRotateRequest(ctx context.Context, g *libkb.GlobalContext, msg keybas
 	})
 }
 
+func HandleOpenTeamSweepRequest(ctx context.Context, g *libkb.GlobalContext, msg keybase1.TeamOpenSweepMsg) (err error) {
+	ctx = libkb.WithLogTag(ctx, "CLKR")
+	defer g.CTrace(ctx, fmt.Sprintf("HandleOpenTeamSweepRequest(teamID=%s,len(resetUsers)=%d)", msg.TeamID, len(msg.ResetUsersUntrusted)), func() error { return err })()
+
+	team, err := Load(ctx, g, keybase1.LoadTeamArg{
+		ID:          msg.TeamID,
+		Public:      msg.TeamID.IsPublic(),
+		ForceRepoll: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !team.IsOpen() {
+		return fmt.Errorf("OpenSweep request for team %s that is not open", team.ID)
+	}
+
+	role, err := team.myRole(ctx)
+	if err != nil {
+		return err
+	}
+	if !role.IsOrAbove(keybase1.TeamRole_ADMIN) {
+		return fmt.Errorf("OpenSweep request for team %s but our role is: %s", team.ID, role.String())
+	}
+
+	rotate := !team.CanSkipKeyRotation()
+	_, err = sweepOpenTeamResetAndDeletedMembers(ctx, g, team, msg.ResetUsersUntrusted, rotate)
+	return err
+}
+
 func sweepOpenTeamResetAndDeletedMembers(ctx context.Context, g *libkb.GlobalContext,
-	team *Team, resetUsersUntrusted []keybase1.TeamCLKRResetUser) (needRepoll bool, err error) {
+	team *Team, resetUsersUntrusted []keybase1.TeamCLKRResetUser, rotate bool) (postedLink bool, err error) {
 	// When CLKR is invoked because of account reset and it's an open team,
 	// we go ahead and boot reset readers and writers out of the team. Key
 	// is also rotated in the process (in the same ChangeMembership link).
-	defer g.CTrace(ctx, "sweepOpenTeamResetAndDeletedMembers", func() error { return err })()
+	defer g.CTrace(ctx, fmt.Sprintf("sweepOpenTeamResetAndDeletedMembers(rotate=%t)", rotate),
+		func() error { return err })()
 
 	// Go through resetUsersUntrusted and fetch non-cached latest
 	// EldestSeqnos/Status.
@@ -110,7 +161,7 @@ func sweepOpenTeamResetAndDeletedMembers(ctx context.Context, g *libkb.GlobalCon
 		}
 	}
 
-	err = RetryOnSigOldSeqnoError(ctx, g, func(ctx context.Context, attempt int) error {
+	err = RetryIfPossible(ctx, g, func(ctx context.Context, attempt int) error {
 		if attempt > 0 {
 			var err error
 			team, err = Load(ctx, g, keybase1.LoadTeamArg{
@@ -146,7 +197,12 @@ func sweepOpenTeamResetAndDeletedMembers(ctx context.Context, g *libkb.GlobalCon
 				if err != nil {
 					continue
 				}
-				if role == keybase1.TeamRole_READER || role == keybase1.TeamRole_WRITER {
+				switch role {
+				case
+					keybase1.TeamRole_RESTRICTEDBOT,
+					keybase1.TeamRole_BOT,
+					keybase1.TeamRole_READER,
+					keybase1.TeamRole_WRITER:
 					changeReq.None = append(changeReq.None, memberUV)
 				}
 			}
@@ -164,9 +220,8 @@ func sweepOpenTeamResetAndDeletedMembers(ctx context.Context, g *libkb.GlobalCon
 
 		opts := ChangeMembershipOptions{
 			// Make it possible for user to come back in once they reprovision.
-			Permanent: false,
-			// Coming from CLKR, we want to ensure team key is rotated.
-			SkipKeyRotation: false,
+			Permanent:       false,
+			SkipKeyRotation: !rotate,
 		}
 		if err := team.ChangeMembershipWithOptions(ctx, changeReq, opts); err != nil {
 			return err
@@ -174,65 +229,131 @@ func sweepOpenTeamResetAndDeletedMembers(ctx context.Context, g *libkb.GlobalCon
 
 		// Notify the caller that we posted a sig and they have to
 		// load team again.
-		needRepoll = true
+		postedLink = true
 		return nil
 	})
 
-	return needRepoll, err
+	return postedLink, err
 }
 
-func handleChangeSingle(ctx context.Context, g *libkb.GlobalContext, row keybase1.TeamChangeRow, change keybase1.TeamChangeSet) (err error) {
+func invalidateCaches(mctx libkb.MetaContext, teamID keybase1.TeamID) {
+	// refresh the KBFS Favorites cache since it no longer should contain
+	// this team.
+	mctx.G().NotifyRouter.HandleFavoritesChanged(mctx.G().GetMyUID())
+	if ekLib := mctx.G().GetEKLib(); ekLib != nil {
+		ekLib.PurgeTeamEKCachesForTeamID(mctx, teamID)
+		ekLib.PurgeTeambotEKCachesForTeamID(mctx, teamID)
+	}
+	if keyer := mctx.G().GetTeambotMemberKeyer(); keyer != nil {
+		keyer.PurgeCache(mctx)
+	}
+}
+
+func handleChangeSingle(ctx context.Context, g *libkb.GlobalContext, row keybase1.TeamChangeRow, change keybase1.TeamChangeSet) (changedMetadata bool, err error) {
 	change.KeyRotated = row.KeyRotated
 	change.MembershipChanged = row.MembershipChanged
+	change.Misc = row.Misc
+	mctx := libkb.NewMetaContext(ctx, g)
 
-	defer g.CTrace(ctx, fmt.Sprintf("team.handleChangeSingle(%+v, %+v)", row, change), func() error { return err })()
+	defer mctx.Trace(fmt.Sprintf("team.handleChangeSingle [%s] (%+v, %+v)", g.Env.GetUsername(), row, change),
+		func() error { return err })()
 
-	err = g.GetTeamLoader().HintLatestSeqno(ctx, row.Id, row.LatestSeqno)
-	if err != nil {
-		g.Log.CWarningf(ctx, "error in HintLatestSeqno: %v", err)
-		return nil
+	// Any errors are already logged in their respective functions.
+	_ = HintLatestSeqno(mctx, row.Id, row.LatestSeqno)
+	_ = HintLatestHiddenSeqno(mctx, row.Id, row.LatestHiddenSeqno)
+
+	// If we're handling a rename we should also purge the resolver cache and
+	// the KBFS favorites cache
+	if change.Renamed {
+		if err = PurgeResolverTeamID(ctx, g, row.Id); err != nil {
+			mctx.Warning("error in PurgeResolverTeamID: %v", err)
+			err = nil // non-fatal
+		}
+		invalidateCaches(mctx, row.Id)
 	}
-	// Send teamID and teamName in two separate notifications. It is server-trust that they are the same team.
-	g.NotifyRouter.HandleTeamChangedByBothKeys(ctx, row.Id, row.Name, row.LatestSeqno, row.ImplicitTeam, change)
+	// Send teamID and teamName in two separate notifications. It is
+	// server-trust that they are the same team.
+	g.NotifyRouter.HandleTeamChangedByBothKeys(ctx, row.Id, row.Name, row.LatestSeqno, row.ImplicitTeam, change, row.LatestHiddenSeqno, row.LatestOffchainSeqno)
 
-	return nil
+	// Note we only get updates about new subteams we create because the flow
+	// is that we join the team as an admin when we create them and then
+	// immediately leave.
+	if change.Renamed || change.MembershipChanged || change.Misc {
+		changedMetadata = true
+	}
+	if change.MembershipChanged {
+		g.NotifyRouter.HandleCanUserPerformChanged(ctx, row.Name)
+	}
+	return changedMetadata, nil
 }
 
 func HandleChangeNotification(ctx context.Context, g *libkb.GlobalContext, rows []keybase1.TeamChangeRow, changes keybase1.TeamChangeSet) (err error) {
-	ctx = libkb.WithLogTag(ctx, "CLKR")
+	ctx = libkb.WithLogTag(ctx, "THCN")
 	defer g.CTrace(ctx, "HandleChangeNotification", func() error { return err })()
+	var anyChangedMetadata bool
 	for _, row := range rows {
-		if err := handleChangeSingle(ctx, g, row, changes); err != nil {
+		if changedMetadata, err := handleChangeSingle(ctx, g, row, changes); err != nil {
 			return err
+		} else if changedMetadata {
+			anyChangedMetadata = true
 		}
 	}
+	if anyChangedMetadata {
+		g.NotifyRouter.HandleTeamMetadataUpdate(ctx)
+	}
+	return nil
+}
+
+func HandleTeamMemberShowcaseChange(ctx context.Context, g *libkb.GlobalContext) (err error) {
+	defer g.CTrace(ctx, "HandleTeamMemberShowcaseChange", func() error { return err })()
+	g.NotifyRouter.HandleTeamMetadataUpdate(ctx)
 	return nil
 }
 
 func HandleDeleteNotification(ctx context.Context, g *libkb.GlobalContext, rows []keybase1.TeamChangeRow) (err error) {
-	defer g.CTrace(ctx, fmt.Sprintf("team.HandleDeleteNotification(%v)", len(rows)), func() error { return err })()
+	mctx := libkb.NewMetaContext(ctx, g)
+	defer mctx.Trace(fmt.Sprintf("team.HandleDeleteNotification(%v)", len(rows)),
+		func() error { return err })()
+
+	g.NotifyRouter.HandleTeamMetadataUpdate(ctx)
 
 	for _, row := range rows {
 		g.Log.CDebugf(ctx, "team.HandleDeleteNotification: (%+v)", row)
-		err := g.GetTeamLoader().Delete(ctx, row.Id)
-		if err != nil {
-			g.Log.CDebugf(ctx, "team.HandleDeleteNotification: error deleting team cache: %v", err)
+		if err := TombstoneTeam(libkb.NewMetaContext(ctx, g), row.Id); err != nil {
+			g.Log.CDebugf(ctx, "team.HandleDeleteNotification: failed to Tombstone: %s", err)
 		}
+		invalidateCaches(mctx, row.Id)
 		g.NotifyRouter.HandleTeamDeleted(ctx, row.Id)
 	}
+
 	return nil
 }
 
 func HandleExitNotification(ctx context.Context, g *libkb.GlobalContext, rows []keybase1.TeamExitRow) (err error) {
-	defer g.CTrace(ctx, fmt.Sprintf("team.HandleExitNotification(%v)", len(rows)), func() error { return err })()
+	mctx := libkb.NewMetaContext(ctx, g)
+	defer mctx.Trace(fmt.Sprintf("team.HandleExitNotification(%v)", len(rows)),
+		func() error { return err })()
 
+	g.NotifyRouter.HandleTeamMetadataUpdate(ctx)
 	for _, row := range rows {
-		g.Log.CDebugf(ctx, "team.HandleExitNotification: (%+v)", row)
-		err := g.GetTeamLoader().Delete(ctx, row.Id)
-		if err != nil {
-			g.Log.CDebugf(ctx, "team.HandleExitNotification: error deleting team cache: %v", err)
+		mctx.Debug("team.HandleExitNotification: (%+v)", row)
+		if err := FreezeTeam(mctx, row.Id); err != nil {
+			mctx.Debug("team.HandleExitNotification: failed to FreezeTeam: %s", err)
 		}
-		g.NotifyRouter.HandleTeamExit(ctx, row.Id)
+		invalidateCaches(mctx, row.Id)
+		mctx.G().NotifyRouter.HandleTeamExit(ctx, row.Id)
+	}
+	return nil
+}
+
+func HandleNewlyAddedToTeamNotification(ctx context.Context, g *libkb.GlobalContext, rows []keybase1.TeamNewlyAddedRow) (err error) {
+	mctx := libkb.NewMetaContext(ctx, g)
+	defer mctx.Trace(fmt.Sprintf("team.HandleNewlyAddedToTeamNotification(%v)", len(rows)),
+		func() error { return err })()
+	for _, row := range rows {
+		mctx.Debug("team.HandleNewlyAddedToTeamNotification: (%+v)", row)
+		mctx.G().NotifyRouter.HandleNewlyAddedToTeam(mctx.Ctx(), row.Id)
+		invalidateCaches(mctx, row.Id)
 	}
 	return nil
 }
@@ -251,7 +372,7 @@ func HandleSBSRequest(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 func handleSBSSingle(ctx context.Context, g *libkb.GlobalContext, teamID keybase1.TeamID, untrustedInviteeFromGregor keybase1.TeamInvitee) (err error) {
 	defer g.CTrace(ctx, fmt.Sprintf("team.handleSBSSingle(teamID: %v, invitee: %+v)", teamID, untrustedInviteeFromGregor), func() error { return err })()
 
-	return RetryOnSigOldSeqnoError(ctx, g, func(ctx context.Context, _ int) error {
+	return RetryIfPossible(ctx, g, func(ctx context.Context, _ int) error {
 		team, err := Load(ctx, g, keybase1.LoadTeamArg{
 			ID:          teamID,
 			Public:      teamID.IsPublic(),
@@ -268,20 +389,20 @@ func handleSBSSingle(ctx context.Context, g *libkb.GlobalContext, teamID keybase
 		invite, found := team.chain().FindActiveInviteByID(untrustedInviteeFromGregor.InviteID)
 		if !found {
 			g.Log.CDebugf(ctx, "FindActiveInviteByID failed for invite %s", untrustedInviteeFromGregor.InviteID)
-			return libkb.NotFoundError{}
+			return libkb.NotFoundError{Msg: "Invite not found"}
 		}
 		g.Log.CDebugf(ctx, "Found invite: %+v", invite)
 		category, err := invite.Type.C()
 		if err != nil {
 			return err
 		}
+		ityp, err := invite.Type.String()
+		if err != nil {
+			return err
+		}
 		switch category {
 		case keybase1.TeamInviteCategory_SBS:
 			//  resolve assertion in link (with uid in invite msg)
-			ityp, err := invite.Type.String()
-			if err != nil {
-				return err
-			}
 			assertion := fmt.Sprintf("%s@%s+uid:%s", string(invite.Name), ityp, untrustedInviteeFromGregor.Uid)
 
 			arg := keybase1.Identify2Arg{
@@ -296,7 +417,7 @@ func handleSBSSingle(ctx context.Context, g *libkb.GlobalContext, teamID keybase
 			if err := engine.RunEngine2(m, eng); err != nil {
 				return err
 			}
-		case keybase1.TeamInviteCategory_EMAIL:
+		case keybase1.TeamInviteCategory_EMAIL, keybase1.TeamInviteCategory_PHONE:
 			// nothing to verify, need to trust the server
 		case keybase1.TeamInviteCategory_KEYBASE:
 			// Check if UV in `untrustedInviteeFromGregor` is the same
@@ -332,22 +453,37 @@ func handleSBSSingle(ctx context.Context, g *libkb.GlobalContext, teamID keybase
 			}
 
 			g.Log.CDebugf(ctx, "User already has same or higher role, canceling invite %s", invite.Id)
-			return removeInviteID(ctx, team, invite.Id)
+			const allowInaction = false
+			return removeInviteID(ctx, team, invite.Id, allowInaction)
 		}
 
 		tx := CreateAddMemberTx(team)
 		if err := tx.AddMemberBySBS(ctx, verifiedInvitee, invite.Role); err != nil {
 			return err
 		}
-		if err := tx.Post(ctx); err != nil {
+		if err := tx.Post(libkb.NewMetaContext(ctx, g)); err != nil {
 			return err
 		}
 
 		// Send chat welcome message
-		if !team.IsImplicit() {
+		if team.IsImplicit() {
+			// Do not send messages about keybase-type invites being resolved.
+			// They are supposed to be transparent for the users and look like
+			// a real members even though they have to be SBS-ed in.
+			if category != keybase1.TeamInviteCategory_KEYBASE {
+				iteamName, err := team.ImplicitTeamDisplayNameString(ctx)
+				if err != nil {
+					return err
+				}
+				g.Log.CDebugf(ctx,
+					"sending resolution message for successful SBS handle")
+				SendChatSBSResolutionMessage(ctx, g, iteamName,
+					string(invite.Name), ityp, verifiedInvitee.Uid)
+			}
+		} else {
 			g.Log.CDebugf(ctx, "sending welcome message for successful SBS handle")
 			SendChatInviteWelcomeMessage(ctx, g, team.Name().String(), category, invite.Inviter.Uid,
-				verifiedInvitee.Uid)
+				verifiedInvitee.Uid, invite.Role)
 		}
 
 		return nil
@@ -379,7 +515,7 @@ func HandleOpenTeamAccessRequest(ctx context.Context, g *libkb.GlobalContext, ms
 	ctx = libkb.WithLogTag(ctx, "CLKR")
 	defer g.CTrace(ctx, "HandleOpenTeamAccessRequest", func() error { return err })()
 
-	return RetryOnSigOldSeqnoError(ctx, g, func(ctx context.Context, _ int) error {
+	return RetryIfPossible(ctx, g, func(ctx context.Context, _ int) error {
 		team, err := Load(ctx, g, keybase1.LoadTeamArg{
 			ID:          msg.TeamID,
 			Public:      msg.TeamID.IsPublic(),
@@ -395,14 +531,16 @@ func HandleOpenTeamAccessRequest(ctx context.Context, g *libkb.GlobalContext, ms
 		}
 
 		joinAsRole := team.chain().inner.OpenTeamJoinAs
-		if joinAsRole != keybase1.TeamRole_READER && joinAsRole != keybase1.TeamRole_WRITER {
+		switch joinAsRole {
+		case keybase1.TeamRole_READER, keybase1.TeamRole_WRITER:
+		default:
 			return fmt.Errorf("unexpected role to add to open team: %v", joinAsRole)
 		}
 
 		tx := CreateAddMemberTx(team)
 		for _, tar := range msg.Tars {
 			uv := NewUserVersion(tar.Uid, tar.EldestSeqno)
-			err := tx.AddMemberByUV(ctx, uv, joinAsRole)
+			err := tx.AddMemberByUV(ctx, uv, joinAsRole, nil)
 			g.Log.CDebugf(ctx, "Open team request: adding %v, returned err: %v", uv, err)
 		}
 
@@ -411,13 +549,14 @@ func HandleOpenTeamAccessRequest(ctx context.Context, g *libkb.GlobalContext, ms
 			return nil
 		}
 
-		return tx.Post(ctx)
+		return tx.Post(libkb.NewMetaContext(ctx, g))
 	})
 }
 
 type chatSeitanRecip struct {
 	inviter keybase1.UID
 	invitee keybase1.UID
+	role    keybase1.TeamRole
 }
 
 func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.TeamSeitanMsg) (err error) {
@@ -459,11 +598,11 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 
 		if currentRole.IsOrAbove(invite.Role) {
 			g.Log.CDebugf(ctx, "User already has same or higher role, canceling invite.")
-			tx.CancelInvite(invite.Id)
+			tx.CancelInvite(invite.Id, uv.Uid)
 			continue
 		}
 
-		err = tx.AddMemberByUV(ctx, uv, invite.Role)
+		err = tx.AddMemberByUV(ctx, uv, invite.Role, nil)
 		if err != nil {
 			g.Log.CDebugf(ctx, "Failed to add %v to transaction: %v", uv, err)
 			continue
@@ -485,6 +624,7 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 		chats = append(chats, chatSeitanRecip{
 			inviter: invite.Inviter.Uid,
 			invitee: seitan.Uid,
+			role:    invite.Role,
 		})
 	}
 
@@ -492,17 +632,17 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 		return nil
 	}
 
-	err = tx.Post(ctx)
+	err = tx.Post(libkb.NewMetaContext(ctx, g))
 	if err != nil {
 		return err
 	}
 
 	// Send chats
 	for _, chat := range chats {
-		g.Log.CDebugf(ctx, "sending welcome message for successful Seitan handle: inviter: %s invitee: %s",
-			chat.inviter, chat.invitee)
+		g.Log.CDebugf(ctx, "sending welcome message for successful Seitan handle: inviter: %s invitee: %s, role: %v",
+			chat.inviter, chat.invitee, chat.role)
 		SendChatInviteWelcomeMessage(ctx, g, team.Name().String(), keybase1.TeamInviteCategory_SEITAN,
-			chat.inviter, chat.invitee)
+			chat.inviter, chat.invitee, chat.role)
 	}
 
 	return nil
@@ -587,10 +727,10 @@ func handleSeitanSingleV2(key keybase1.SeitanPubKey, invite keybase1.TeamInvite,
 
 	var sig SeitanSig
 	decodedSig, err := base64.StdEncoding.DecodeString(string(seitan.Akey)) // For V2 the server responds with sig in the akey field
-	if len(sig) != len(decodedSig) {
+	if err != nil || len(sig) != len(decodedSig) {
 		return errors.New("Signature length verification failed (seitan)")
 	}
-	copy(sig[:], decodedSig[:])
+	copy(sig[:], decodedSig)
 
 	now := keybase1.Time(seitan.UnixCTime) // For V2 this is ms since the epoch, not seconds
 	// NOTE: Since we are re-serializing the values from seitan here to
@@ -607,4 +747,13 @@ func handleSeitanSingleV2(key keybase1.SeitanPubKey, invite keybase1.TeamInvite,
 	}
 
 	return nil
+}
+
+func HandleForceRepollNotification(ctx context.Context, g *libkb.GlobalContext, dtime gregor.TimeOrOffset) error {
+	e1 := g.GetTeamLoader().ForceRepollUntil(ctx, dtime)
+	e2 := g.GetFastTeamLoader().ForceRepollUntil(libkb.NewMetaContext(ctx, g), dtime)
+	if e1 != nil {
+		return e1
+	}
+	return e2
 }

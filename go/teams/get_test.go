@@ -17,11 +17,12 @@ func TestTeamGet(t *testing.T) {
 	tc := SetupTest(t, "team", 1)
 	defer tc.Cleanup()
 
-	kbtest.CreateAndSignupFakeUser("team", tc.G)
+	_, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
+	require.NoError(t, err)
 
 	name := createTeam(tc)
 
-	_, err := GetForTestByStringName(context.TODO(), tc.G, name)
+	_, err = GetForTestByStringName(context.TODO(), tc.G, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +32,8 @@ func TestTeamApplicationKey(t *testing.T) {
 	tc := SetupTest(t, "team", 1)
 	defer tc.Cleanup()
 
-	kbtest.CreateAndSignupFakeUser("team", tc.G)
+	_, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
+	require.NoError(t, err)
 
 	name := createTeam(tc)
 
@@ -64,11 +66,12 @@ func TestTeamGetRepeat(t *testing.T) {
 		tc := SetupTest(t, "team", 1)
 		defer tc.Cleanup()
 
-		kbtest.CreateAndSignupFakeUser("team", tc.G)
+		_, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
+		require.NoError(t, err)
 
 		name := createTeam(tc)
 
-		_, err := GetForTestByStringName(context.TODO(), tc.G, name)
+		_, err = GetForTestByStringName(context.TODO(), tc.G, name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,7 +83,8 @@ func TestTeamGetWhileCreate(t *testing.T) {
 	tc := SetupTest(t, "team", 1)
 	defer tc.Cleanup()
 
-	kbtest.CreateAndSignupFakeUser("team", tc.G)
+	_, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
+	require.NoError(t, err)
 
 	name := createTeam(tc)
 
@@ -130,10 +134,13 @@ func TestTeamDetailsAsImplicitAdmin(t *testing.T) {
 
 	t.Logf("loads the subteam")
 	team, err := Details(context.Background(), tcs[0].G, teamName.String()+".bbb")
+	require.NoError(t, err)
 	require.Len(t, team.Members.Owners, 0, "should be no team members in subteam")
 	require.Len(t, team.Members.Admins, 0, "should be no team members in subteam")
 	require.Len(t, team.Members.Writers, 0, "should be no team members in subteam")
 	require.Len(t, team.Members.Readers, 0, "should be no team members in subteam")
+	require.Len(t, team.Members.Bots, 0, "should be no team members in subteam")
+	require.Len(t, team.Members.RestrictedBots, 0, "should be no team members in subteam")
 }
 
 // Test loading when you have become an admin after
@@ -150,7 +157,7 @@ func TestGetMaybeAdminByStringName(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Logf("U0 adds U1 as a reader")
-	_, err = AddMember(context.TODO(), tcs[0].G, teamName.String(), fus[1].Username, keybase1.TeamRole_READER)
+	_, err = AddMember(context.TODO(), tcs[0].G, teamName.String(), fus[1].Username, keybase1.TeamRole_READER, nil)
 	require.NoError(t, err)
 
 	t.Logf("U1 loads and is a reader")
@@ -186,15 +193,54 @@ func TestGetMaybeAdminByStringName(t *testing.T) {
 	require.Equal(t, 1, len(team.chain().inner.SubteamLog), "has loaded previously-stubbed admin links")
 }
 
+func TestGetTeamIDByName(t *testing.T) {
+	fus, tcs, cleanup := setupNTests(t, 2)
+	defer cleanup()
+
+	teamName, teamID := createTeam2(*tcs[0])
+	subteamName, subteamID := createSubteam(tcs[0], teamName, "hello")
+
+	// Test as owner of team and subteam
+	mctx := libkb.NewMetaContextForTest(*tcs[0])
+	res, err := GetTeamIDByNameRPC(mctx, teamName.String())
+	require.NoError(t, err)
+	require.Equal(t, teamID, res)
+
+	res, err = GetTeamIDByNameRPC(mctx, subteamName.String())
+	require.NoError(t, err)
+	require.Equal(t, subteamID, res)
+
+	// Test as unrelated user
+	mctx = libkb.NewMetaContextForTest(*tcs[1])
+	_, err = GetTeamIDByNameRPC(mctx, teamName.String())
+	require.Error(t, err)
+
+	_, err = GetTeamIDByNameRPC(mctx, subteamName.String())
+	require.Error(t, err)
+
+	// Add user 1 as a reader to root team
+	_, err = AddMember(context.Background(), tcs[0].G, teamName.String(), fus[1].Username, keybase1.TeamRole_READER, nil)
+	require.NoError(t, err)
+
+	res, err = GetTeamIDByNameRPC(mctx, teamName.String())
+	require.NoError(t, err)
+	require.Equal(t, teamID, res)
+
+	// Try to get subteam id, should still fail.
+	_, err = GetTeamIDByNameRPC(mctx, subteamName.String())
+	require.Error(t, err)
+}
+
 func teamGet(t *testing.T) {
 	tc := SetupTest(t, "team", 1)
 	defer tc.Cleanup()
 
-	kbtest.CreateAndSignupFakeUser("team", tc.G)
+	_, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
+	require.NoError(t, err)
 
 	name := createTeam(tc)
 
-	_, err := GetForTestByStringName(context.TODO(), tc.G, name)
+	_, err = GetForTestByStringName(context.TODO(), tc.G, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,14 +248,12 @@ func teamGet(t *testing.T) {
 
 func createTeam(tc libkb.TestContext) string {
 	b, err := libkb.RandBytes(4)
-	if err != nil {
-		tc.T.Fatal(err)
-	}
+	require.NoError(tc.T, err)
+
 	name := hex.EncodeToString(b)
 	_, err = CreateRootTeam(context.TODO(), tc.G, name, keybase1.TeamSettings{})
-	if err != nil {
-		tc.T.Fatal(err)
-	}
+	require.NoError(tc.T, err)
+
 	return name
 }
 
@@ -217,7 +261,9 @@ func createTeam2(tc libkb.TestContext) (keybase1.TeamName, keybase1.TeamID) {
 	teamNameS := createTeam(tc)
 	teamName, err := keybase1.TeamNameFromString(teamNameS)
 	require.NoError(tc.T, err)
-	return teamName, teamName.ToPrivateTeamID()
+	id := teamName.ToPrivateTeamID()
+	tc.T.Logf("created team %s: %s", id, teamName)
+	return teamName, id
 }
 
 func createSubteam(tc *libkb.TestContext, parent keybase1.TeamName, subteamNamePart string) (keybase1.TeamName, keybase1.TeamID) {

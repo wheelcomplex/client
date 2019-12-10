@@ -14,7 +14,6 @@ import (
 type SaltpackVerify struct {
 	libkb.Contextified
 	arg *SaltpackVerifyArg
-	key libkb.NaclSigningKeyPair
 }
 
 // SaltpackVerifyArg are engine args.
@@ -77,7 +76,7 @@ func (e *SaltpackVerify) detached(m libkb.MetaContext) error {
 }
 
 func (e *SaltpackVerify) identifySender(m libkb.MetaContext, key saltpack.SigningPublicKey) (err error) {
-	defer m.CTrace("SaltpackVerify#identifySender", func() error { return err })()
+	defer m.Trace("SaltpackVerify#identifySender", func() error { return err })()
 
 	kid := libkb.SigningPublicKeyToKeybaseKID(key)
 	spsiArg := SaltpackSenderIdentifyArg{

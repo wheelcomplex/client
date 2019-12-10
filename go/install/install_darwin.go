@@ -5,6 +5,7 @@ package install
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -21,6 +22,7 @@ import (
 	kbnminstaller "github.com/keybase/client/go/kbnm/installer"
 	"github.com/keybase/client/go/launchd"
 	"github.com/keybase/client/go/libkb"
+	"github.com/keybase/client/go/logger"
 	"github.com/keybase/client/go/mounter"
 	"github.com/keybase/client/go/protocol/keybase1"
 )
@@ -436,6 +438,44 @@ func InstallAuto(context Context, binPath string, sourcePath string, timeout tim
 	return Install(context, binPath, sourcePath, components, forceUnmount, timeout, log)
 }
 
+const mountsPresentErrorCode = 7 // See Installer/Installer.m
+
+func installFuse(runMode libkb.RunMode, log Log) error {
+	err := libnativeinstaller.InstallFuse(runMode, log)
+	switch e := err.(type) {
+	case nil:
+		return nil
+	case (*exec.ExitError):
+		if waitStatus, ok := e.Sys().(syscall.WaitStatus); ok {
+			if waitStatus.ExitStatus() != mountsPresentErrorCode {
+				return err
+			}
+			// Otherwise, continue with the logic after switch.
+		} else {
+			return err
+		}
+	default:
+		return err
+	}
+
+	log.Info("Can't install/upgrade fuse when mounts are present. " +
+		"Assuming it's the redirector and trying to uninstall it first.")
+	if err = libnativeinstaller.UninstallRedirector(runMode, log); err != nil {
+		log.Info("Uninstalling redirector failed. " +
+			"Fuse should be able to update next time the OS reboots.")
+		return err
+	}
+	defer libnativeinstaller.InstallRedirector(runMode, log)
+	log.Info(
+		"Uninstalling redirector succeeded. Trying to install KBFuse again.")
+	if err = libnativeinstaller.InstallFuse(runMode, log); err != nil {
+		log.Info("Installing fuse failed again. " +
+			"Fuse should be able to update next time the OS reboots.")
+		return err
+	}
+	return nil
+}
+
 // Install installs specified components
 func Install(context Context, binPath string, sourcePath string, components []string, force bool, timeout time.Duration, log Log) keybase1.InstallResult {
 	var err error
@@ -532,7 +572,7 @@ func Install(context Context, binPath string, sourcePath string, components []st
 
 	if !helperCanceled &&
 		libkb.IsIn(string(ComponentNameFuse), components, false) {
-		err = libnativeinstaller.InstallFuse(context.GetRunMode(), log)
+		err = installFuse(context.GetRunMode(), log)
 		componentResults = append(componentResults, componentResult(string(ComponentNameFuse), err))
 		if err != nil {
 			log.Errorf("Error installing KBFuse: %s", err)
@@ -614,6 +654,18 @@ func installCommandLine(context Context, binPath string, force bool, log Log) er
 	}
 
 	return nil
+}
+
+func createCommandLine(binPath string, linkPath string, log Log) error {
+	if _, err := os.Lstat(linkPath); err == nil {
+		err := os.Remove(linkPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	log.Info("Linking %s to %s", linkPath, binPath)
+	return os.Symlink(binPath, linkPath)
 }
 
 func installCommandLineForBinPath(binPath string, linkPath string, force bool, log Log) error {
@@ -720,6 +772,23 @@ func InstallKBFS(context Context, binPath string, force bool, skipMountIfNotAvai
 
 	log.Debug("KBFS installed via launchd successfully")
 	return nil
+}
+
+func uninstallCommandLine(log Log) error {
+	linkPath, err := defaultLinkPath()
+	if err != nil {
+		return nil
+	}
+
+	err = uninstallLink(linkPath, log)
+	if err != nil {
+		return err
+	}
+
+	// Now the git binary.
+	gitBinFilename := "git-remote-keybase"
+	gitLinkPath := filepath.Join(filepath.Dir(linkPath), gitBinFilename)
+	return uninstallLink(gitLinkPath, log)
 }
 
 // InstallKBNM installs the Keybase NativeMessaging whitelist
@@ -851,12 +920,13 @@ func UninstallKBFSOnStop(context Context, log Log) error {
 	if err != nil {
 		return err
 	}
+	log.Info("UninstallKBFSOnStop: uninstalling from mountdir: %s", mountDir)
 
 	if err := UninstallKBFS(context, mountDir, false, log); err != nil {
 		return err
 	}
 
-	log.Info("Uninstall mount: %s", mountDir)
+	log.Info("Uninstalled mount: %s", mountDir)
 	if err := libnativeinstaller.UninstallMountDir(runMode, log); err != nil {
 		return fmt.Errorf("Error uninstalling mount: %s", err)
 	}
@@ -1347,5 +1417,32 @@ func fallbackKillProcess(context Context, log Log, label string, infoPath, pidPa
 	}
 	log.Debug("fallback pid file %s for %s removed", fpid, svc.Label())
 
+	return nil
+}
+
+// StartUpdateIfNeeded starts to update the app if there's one available. It
+// calls `updater check` internally so it ignores the snooze.
+func StartUpdateIfNeeded(ctx context.Context, log logger.Logger) error {
+	updaterPath, err := UpdaterBinPath()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(updaterPath, "check")
+	// Run it in a new process group so when we are killed eventually by the
+	// updater, we don't bring down the updater too.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	pid := -1
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	log.Debug("Started background updater process (%s). pid=%d", updaterPath, pid)
+	cmd.Wait()
+	// Ignore the exit status here as user may have hit "Ignore". If we are
+	// here without getting killed, it's likely user has hit "Ignore". Just
+	// just return `nil` and GUI would check for update info again where it'd
+	// know we don't need to update anymore.
 	return nil
 }

@@ -11,7 +11,9 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 
+	"github.com/keybase/client/go/kbcrypto"
 	"github.com/keybase/client/go/libkb"
+	"github.com/keybase/client/go/msgpack"
 	"github.com/keybase/go-crypto/ed25519"
 	"golang.org/x/net/context"
 
@@ -90,7 +92,7 @@ func (sikey SeitanSIKeyV2) GenerateTeamInviteID() (id SCTeamInviteID, err error)
 		Version SeitanVersion `codec:"version" json:"version"`
 	}
 
-	payload, err := libkb.MsgpackEncode(InviteStagePayload{
+	payload, err := msgpack.Encode(InviteStagePayload{
 		Stage:   "invite_id",
 		Version: SeitanVersion2,
 	})
@@ -106,7 +108,7 @@ func (sikey SeitanSIKeyV2) generateKeyPair() (key libkb.NaclSigningKeyPair, err 
 		Version SeitanVersion `codec:"version" json:"version"`
 	}
 
-	payload, err := libkb.MsgpackEncode(PrivateKeySeedPayload{
+	payload, err := msgpack.Encode(PrivateKeySeedPayload{
 		Stage:   "eddsa",
 		Version: SeitanVersion2,
 	})
@@ -128,7 +130,7 @@ func (sikey SeitanSIKeyV2) generateKeyPair() (key libkb.NaclSigningKeyPair, err 
 	}
 
 	copy(key.Public[:], pub[:])
-	key.Private = &libkb.NaclSigningKeyPrivate{}
+	key.Private = &kbcrypto.NaclSigningKeyPrivate{}
 	copy(key.Private[:], priv[:])
 	return key, nil
 }
@@ -144,7 +146,7 @@ func (sikey SeitanSIKeyV2) generatePackedEncryptedKeyWithSecretKey(secretKey key
 	keyAndLabel.K = keybase1.SeitanPubKey(keyPair.GetKID().String())
 	keyAndLabel.L = label
 
-	packedKeyAndLabel, err := libkb.MsgpackEncode(keybase1.NewSeitanKeyAndLabelWithV2(keyAndLabel))
+	packedKeyAndLabel, err := msgpack.Encode(keybase1.NewSeitanKeyAndLabelWithV2(keyAndLabel))
 	if err != nil {
 		return pkey, encoded, err
 	}
@@ -166,8 +168,8 @@ func (sikey SeitanSIKeyV2) GeneratePackedEncryptedKey(ctx context.Context, team 
 }
 
 // "Signature"
-type SeitanSig libkb.NaclSignature
-type SeitanPubKey libkb.NaclSigningKeyPublic
+type SeitanSig kbcrypto.NaclSignature
+type SeitanPubKey kbcrypto.NaclSigningKeyPublic
 
 func GenerateSeitanSignatureMessage(uid keybase1.UID, eldestSeqno keybase1.Seqno, inviteID SCTeamInviteID, time keybase1.Time) (payload []byte, err error) {
 	type SigPayload struct {
@@ -179,7 +181,7 @@ func GenerateSeitanSignatureMessage(uid keybase1.UID, eldestSeqno keybase1.Seqno
 		Version     SeitanVersion  `codec:"version" json:"version"`
 	}
 
-	payload, err = libkb.MsgpackEncode(SigPayload{
+	payload, err = msgpack.Encode(SigPayload{
 		Stage:       "accept",
 		Version:     SeitanVersion2,
 		InviteID:    inviteID,
@@ -191,8 +193,8 @@ func GenerateSeitanSignatureMessage(uid keybase1.UID, eldestSeqno keybase1.Seqno
 }
 
 func VerifySeitanSignatureMessage(pubKey SeitanPubKey, msg []byte, sig SeitanSig) error {
-	naclsig := libkb.NaclSignature(sig)
-	valid := libkb.NaclSigningKeyPublic(pubKey).Verify(msg, &naclsig)
+	naclsig := kbcrypto.NaclSignature(sig)
+	valid := kbcrypto.NaclSigningKeyPublic(pubKey).Verify(msg, naclsig)
 	if !valid {
 		return libkb.KeyCannotVerifyError{}
 	}
@@ -218,7 +220,7 @@ func (sikey SeitanSIKeyV2) GenerateSignature(uid keybase1.UID, eldestSeqno keyba
 		return sig, encoded, err
 	}
 
-	sig = SeitanSig(*keyPair.Private.Sign(payload))
+	sig = SeitanSig(keyPair.Private.Sign(payload))
 	encoded = base64.StdEncoding.EncodeToString(sig[:])
 	return sig, encoded, nil
 }

@@ -47,52 +47,34 @@ js_tests() {
     has_js_files
 
     echo 'yarn install'
-    yarn cache clean
-    yarn install --pure-lockfile --prefer-offline --no-emoji --no-progress
+    yarn modules --ignore-engines
     check_rc $? 'yarn install fail' 1
-    echo 'yarn run -s flow status'
-    flow_status_output=$(yarn run -s flow status)
-    echo $flow_status_output
-    [[ $flow_status_output == 'No errors!' ]]
-    check_rc $? 'yarn run -s flow status' 1
-    echo 'yarn run lint'
-    yarn run lint
+
+    echo 'checking no mutated yarn.lock file'
+    git diff --exit-code yarn.lock
+    check_rc $? 'unexpected yarn.lock changes, did you forget to commit it? Do you have an inexact semver?' 1
+
+    echo 'yarn build-actions'
+    yarn build-actions
+    check_rc $? 'yarn build-actions failed!' 1
+    git diff --exit-code actions
+    check_rc $? 'unexpected generated actions changes, did you forget to run yarn build-actions?' 1
+
+    echo 'yarn tsc'
+    yarn tsc
+    check_rc $? 'tsc failed!' 1
+
+    echo 'yarn lint'
+    yarn lint
     check_rc $? 'yarn run lint fail' 1
+
     echo 'yarn test'
     yarn test
     check_rc $? 'yarn test fail' 1
+
+    echo 'yarn prettier-check'
+    yarn prettier-check
+    check_rc $? 'yarn prettier-check fail' 1
 }
 
-visdiff() {
-    echo 'visdiff'
-    has_js_files
-
-    if [ $against_master -eq 1 ]; then
-        echo 'No $change_target, skipping visdiff'
-    else
-        node ../visdiff/dist/index.js "$change_base...$commit_hash"
-        check_rc $? 'visdiff fail' 1
-    fi
-}
-
-visdiff_install() {
-    echo 'visdiff-install'
-    has_js_files
-    if [ $against_master -eq 1 ]; then
-        echo 'No $change_target, skipping visdiff'
-    else
-        cd ../visdiff
-        yarn cache clean
-        yarn install --pure-lockfile
-        cd ../shared
-        check_rc $? 'visdiff fail' 1
-    fi
-}
-
-if [ $test_type == 'visdiff' ]; then
-    visdiff
-elif [ $test_type == 'visdiff-install' ]; then
-    visdiff_install
-else
-    js_tests
-fi
+js_tests

@@ -4,12 +4,15 @@
 package libkb
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 
 	jsonw "github.com/keybase/go-jsonw"
@@ -28,6 +31,7 @@ type JSONFile struct {
 	which    string
 	jw       *jsonw.Wrapper
 	exists   bool
+	setMutex sync.RWMutex
 
 	txMutex sync.Mutex
 	tx      *jsonFileTransaction
@@ -48,51 +52,59 @@ func (f *JSONFile) GetWrapper() *jsonw.Wrapper {
 func (f *JSONFile) Exists() bool { return f.exists }
 
 func (f *JSONFile) Load(warnOnNotFound bool) error {
-	f.G().Log.Debug("+ loading %s file: %s", f.which, f.filename)
+	found, err := f.LoadCheckFound()
+	if err != nil {
+		return err
+	}
+	if !found {
+		msg := fmt.Sprintf("No %q file found; tried %s", f.which, f.filename)
+		if warnOnNotFound {
+			f.G().Log.Warning(msg)
+		} else {
+			f.G().Log.Debug(msg)
+		}
+	}
+	return nil
+}
+
+func (f *JSONFile) LoadCheckFound() (found bool, err error) {
+	f.G().Log.Debug("+ loading %q file: %s", f.which, f.filename)
 	file, err := os.Open(f.filename)
 	if err != nil {
 		if os.IsNotExist(err) {
-			msg := fmt.Sprintf("No %s file found; tried %s", f.which, f.filename)
-			if warnOnNotFound {
-				f.G().Log.Warning(msg)
-			} else {
-				f.G().Log.Debug(msg)
-			}
-			return nil
+			return false, nil
 		}
 
 		MobilePermissionDeniedCheck(f.G(), err, fmt.Sprintf("%s: %s", f.which, f.filename))
 
 		if os.IsPermission(err) {
 			f.G().Log.Warning("Permission denied opening %s file %s", f.which, f.filename)
-			return nil
+			return true, nil
 		}
 
-		return err
+		return true, err
 	}
 	f.exists = true
 	defer file.Close()
-	decoder := json.NewDecoder(file)
+
+	var buf bytes.Buffer
+	fileTee := io.TeeReader(bufio.NewReader(file), &buf)
+	err = jsonw.EnsureMaxDepthDefault(bufio.NewReader(fileTee))
+	if err != nil {
+		return true, err
+	}
+
+	decoder := json.NewDecoder(&buf)
 	obj := make(map[string]interface{})
 	// Treat empty files like an empty dictionary
 	if err = decoder.Decode(&obj); err != nil && err != io.EOF {
 		f.G().Log.Errorf("Error decoding %s file %s", f.which, f.filename)
-		return err
+		return true, err
 	}
 	f.jw = jsonw.NewWrapper(obj)
 
-	if runtime.GOOS == "android" {
-		// marshal it into json without indents to make it one line
-		out, err := json.Marshal(obj)
-		if err != nil {
-			f.G().Log.Debug("JSONFile.Load: error marshaling decoded config obj: %s", err)
-		} else {
-			f.G().Log.Debug("JSONFile.Load: %s contents (marshaled): %s", f.filename, string(out))
-		}
-	}
-
 	f.G().Log.Debug("- successfully loaded %s file", f.which)
-	return nil
+	return true, nil
 }
 
 func (f *JSONFile) Nuke() error {
@@ -107,8 +119,7 @@ func (f *JSONFile) BeginTransaction() (ConfigWriterTransacter, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = f.setTx(tx)
-	if err != nil {
+	if err = f.setTx(tx); err != nil {
 		return nil, err
 	}
 	return tx, nil
@@ -155,6 +166,19 @@ func newJSONFileTransaction(f *JSONFile) (*jsonFileTransaction, error) {
 	return ret, nil
 }
 
+func (f *JSONFile) SetWrapperAtPath(p string, w *jsonw.Wrapper) error {
+	err := f.jw.SetValueAtPath(p, w)
+	if err == nil {
+		err = f.Save()
+	}
+	return err
+}
+
+func (f *JSONFile) DeleteAtPath(p string) {
+	_ = f.jw.DeleteValueAtPath(p)
+	_ = f.Save()
+}
+
 func (f *JSONFile) Save() error {
 	tx, txCreated, err := f.getOrMakeTx()
 	if err != nil {
@@ -165,7 +189,7 @@ func (f *JSONFile) Save() error {
 		// still exists on exit
 		defer func() {
 			if tx != nil {
-				tx.Abort()
+				_ = tx.Abort()
 			}
 		}()
 	}
@@ -312,8 +336,28 @@ func (f *JSONFile) save() (err error) {
 func (f *jsonFileTransaction) Abort() error {
 	f.f.G().Log.Debug("+ Aborting %s rewrite %s", f.f.which, f.tmpname)
 	err := os.Remove(f.tmpname)
-	f.f.setTx(nil)
+	setErr := f.f.setTx(nil)
+	if err == nil {
+		err = setErr
+	}
 	f.f.G().Log.Debug("- Abort -> %s\n", ErrToOk(err))
+	return err
+}
+
+// Rollback reloads config from unchanged config file, bringing its
+// state back to from before the transaction changes. Note that it
+// only works for changes that do not affect UserConfig, which caches
+// values, and has to be reloaded manually.
+func (f *jsonFileTransaction) Rollback() error {
+	f.f.G().Log.Debug("+ Rolling back %s to state from %s", f.f.which, f.f.filename)
+	err := f.f.Load(false)
+	if !f.f.exists {
+		// Before transaction there was no file, so set in-memory
+		// wrapper to clean state as well.
+		f.f.jw = jsonw.NewDictionary()
+		f.f.G().Log.Debug("+ Rolling back to clean state because f.exists is false")
+	}
+	f.f.G().Log.Debug("- Rollback -> %s", ErrToOk(err))
 	return err
 }
 
@@ -330,7 +374,150 @@ func (f *jsonFileTransaction) Commit() (err error) {
 	if err != nil {
 		f.f.G().Log.Debug("| Commit: rename %q => %q error: %s", f.tmpname, f.f.filename, err)
 	}
-	f.f.setTx(nil)
+	return f.f.setTx(nil)
+}
 
+type valueGetter func(*jsonw.Wrapper) (interface{}, error)
+
+func (f *JSONFile) getValueAtPath(p string, getter valueGetter) (ret interface{}, isSet bool) {
+	var err error
+	ret, err = getter(f.jw.AtPath(p))
+	if err == nil {
+		isSet = true
+	}
+	return ret, isSet
+}
+
+func getString(w *jsonw.Wrapper) (interface{}, error) {
+	return w.GetString()
+}
+
+func getBool(w *jsonw.Wrapper) (interface{}, error) {
+	return w.GetBool()
+}
+
+func getInt(w *jsonw.Wrapper) (interface{}, error) {
+	return w.GetInt()
+}
+
+func getFloat(w *jsonw.Wrapper) (interface{}, error) {
+	return w.GetFloat()
+}
+
+func (f *JSONFile) GetFilename() string {
+	return f.filename
+}
+
+func (f *JSONFile) GetInterfaceAtPath(p string) (i interface{}, err error) {
+	f.setMutex.RLock()
+	defer f.setMutex.RUnlock()
+	return f.jw.AtPath(p).GetInterface()
+}
+
+func (f *JSONFile) GetStringAtPath(p string) (ret string, isSet bool) {
+	f.setMutex.RLock()
+	defer f.setMutex.RUnlock()
+	i, isSet := f.getValueAtPath(p, getString)
+	if isSet {
+		ret = i.(string)
+	}
+	return ret, isSet
+}
+
+func (f *JSONFile) GetBoolAtPath(p string) (ret bool, isSet bool) {
+	f.setMutex.RLock()
+	defer f.setMutex.RUnlock()
+	i, isSet := f.getValueAtPath(p, getBool)
+	if isSet {
+		ret = i.(bool)
+	}
+	return ret, isSet
+}
+
+func (f *JSONFile) GetIntAtPath(p string) (ret int, isSet bool) {
+	f.setMutex.RLock()
+	defer f.setMutex.RUnlock()
+	i, isSet := f.getValueAtPath(p, getInt)
+	if isSet {
+		ret = i.(int)
+	}
+	return ret, isSet
+}
+
+func (f *JSONFile) GetFloatAtPath(p string) (ret float64, isSet bool) {
+	f.setMutex.RLock()
+	defer f.setMutex.RUnlock()
+	v, isSet := f.getValueAtPath(p, getFloat)
+	if isSet {
+		ret = v.(float64)
+	}
+	return ret, isSet
+}
+
+func (f *JSONFile) GetNullAtPath(p string) (isSet bool) {
+	f.setMutex.RLock()
+	defer f.setMutex.RUnlock()
+	w := f.jw.AtPath(p)
+	isSet = w.IsNil() && w.Error() == nil
+	return isSet
+}
+
+func (f *JSONFile) setValueAtPath(p string, getter valueGetter, v interface{}) error {
+	existing, err := getter(f.jw.AtPath(p))
+
+	if err != nil || existing != v {
+		err = f.jw.SetValueAtPath(p, jsonw.NewWrapper(v))
+		if err == nil {
+			return f.Save()
+		}
+	}
 	return err
+}
+
+func (f *JSONFile) SetStringAtPath(p string, v string) error {
+	f.setMutex.Lock()
+	defer f.setMutex.Unlock()
+	return f.setValueAtPath(p, getString, v)
+}
+
+func (f *JSONFile) SetBoolAtPath(p string, v bool) error {
+	f.setMutex.Lock()
+	defer f.setMutex.Unlock()
+	return f.setValueAtPath(p, getBool, v)
+}
+
+func (f *JSONFile) SetIntAtPath(p string, v int) error {
+	f.setMutex.Lock()
+	defer f.setMutex.Unlock()
+	return f.setValueAtPath(p, getInt, v)
+}
+
+func (f *JSONFile) SetFloatAtPath(p string, v float64) error {
+	f.setMutex.Lock()
+	defer f.setMutex.Unlock()
+	return f.setValueAtPath(p, getFloat, v)
+}
+
+func (f *JSONFile) SetInt64AtPath(p string, v int64) error {
+	f.setMutex.Lock()
+	defer f.setMutex.Unlock()
+	return f.setValueAtPath(p, getInt, v)
+}
+
+func (f *JSONFile) SetNullAtPath(p string) (err error) {
+	f.setMutex.Lock()
+	defer f.setMutex.Unlock()
+	existing := f.jw.AtPath(p)
+	if !existing.IsNil() || existing.Error() != nil {
+		err = f.jw.SetValueAtPath(p, jsonw.NewNil())
+		if err == nil {
+			return f.Save()
+		}
+	}
+	return err
+}
+
+func isJSONNoSuchKeyError(err error) bool {
+	_, isJSONError := err.(*jsonw.Error)
+	return err != nil && isJSONError && strings.Contains(err.Error(), "no such key")
 }

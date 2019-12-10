@@ -12,28 +12,29 @@ import (
 	context "golang.org/x/net/context"
 )
 
-type supersedesTransform interface {
-	Run(ctx context.Context,
-		conv types.UnboxConversationInfo, uid gregor1.UID, originalMsgs []chat1.MessageUnboxed) ([]chat1.MessageUnboxed, error)
-}
-
 type getMessagesFunc func(context.Context, types.UnboxConversationInfo, gregor1.UID, []chat1.MessageID,
 	*chat1.GetThreadReason) ([]chat1.MessageUnboxed, error)
+
+type basicSupersedesTransformOpts struct {
+	UseDeletePlaceholders bool
+}
 
 type basicSupersedesTransform struct {
 	globals.Contextified
 	utils.DebugLabeler
 
 	messagesFunc getMessagesFunc
+	opts         basicSupersedesTransformOpts
 }
 
-var _ supersedesTransform = (*basicSupersedesTransform)(nil)
+var _ types.SupersedesTransform = (*basicSupersedesTransform)(nil)
 
-func newBasicSupersedesTransform(g *globals.Context) *basicSupersedesTransform {
+func newBasicSupersedesTransform(g *globals.Context, opts basicSupersedesTransformOpts) *basicSupersedesTransform {
 	return &basicSupersedesTransform{
 		Contextified: globals.NewContextified(g),
 		DebugLabeler: utils.NewDebugLabeler(g.GetLog(), "supersedesTransform", false),
 		messagesFunc: g.ConvSource.GetMessages,
+		opts:         opts,
 	}
 }
 
@@ -51,31 +52,30 @@ func (t *basicSupersedesTransform) transformDelete(msg chat1.MessageUnboxed, sup
 }
 
 func (t *basicSupersedesTransform) transformEdit(msg chat1.MessageUnboxed, superMsg chat1.MessageUnboxed) *chat1.MessageUnboxed {
-	clientHeader := msg.Valid().ClientHeader
-	clientHeader.MessageType = chat1.MessageType_TEXT
-	newMsg := chat1.NewMessageUnboxedWithValid(chat1.MessageUnboxedValid{
-		ClientHeader: clientHeader,
-		ServerHeader: msg.Valid().ServerHeader,
-		MessageBody: chat1.NewMessageBodyWithText(chat1.MessageText{
-			Body: superMsg.Valid().MessageBody.Edit().Body,
-		}),
-		SenderUsername:        msg.Valid().SenderUsername,
-		SenderDeviceName:      msg.Valid().SenderDeviceName,
-		SenderDeviceType:      msg.Valid().SenderDeviceType,
-		HeaderHash:            msg.Valid().HeaderHash,
-		HeaderSignature:       msg.Valid().HeaderSignature,
-		SenderDeviceRevokedAt: msg.Valid().SenderDeviceRevokedAt,
-		AtMentions:            superMsg.Valid().AtMentions,
-		AtMentionUsernames:    superMsg.Valid().AtMentionUsernames,
-		ChannelMention:        superMsg.Valid().ChannelMention,
-		ChannelNameMentions:   superMsg.Valid().ChannelNameMentions,
+	mvalid := msg.Valid()
+	var payments []chat1.TextPayment
+	var replyTo *chat1.MessageID
+	if mvalid.MessageBody.IsType(chat1.MessageType_TEXT) {
+		payments = mvalid.MessageBody.Text().Payments
+		replyTo = mvalid.MessageBody.Text().ReplyTo
+	}
+	mvalid.MessageBody = chat1.NewMessageBodyWithText(chat1.MessageText{
+		Body:     superMsg.Valid().MessageBody.Edit().Body,
+		Payments: payments,
+		ReplyTo:  replyTo,
 	})
+	mvalid.AtMentions = superMsg.Valid().AtMentions
+	mvalid.AtMentionUsernames = superMsg.Valid().AtMentionUsernames
+	mvalid.ChannelMention = superMsg.Valid().ChannelMention
+	mvalid.ChannelNameMentions = superMsg.Valid().ChannelNameMentions
+	mvalid.SenderDeviceName = superMsg.Valid().SenderDeviceName
+	mvalid.SenderDeviceType = superMsg.Valid().SenderDeviceType
+	newMsg := chat1.NewMessageUnboxedWithValid(mvalid)
 	return &newMsg
 }
 
 func (t *basicSupersedesTransform) transformAttachment(msg chat1.MessageUnboxed, superMsg chat1.MessageUnboxed) *chat1.MessageUnboxed {
-	clientHeader := msg.Valid().ClientHeader
-	clientHeader.MessageType = chat1.MessageType_ATTACHMENT
+	mvalid := msg.Valid()
 	uploaded := superMsg.Valid().MessageBody.Attachmentuploaded()
 	attachment := chat1.MessageAttachment{
 		Object:   uploaded.Object,
@@ -86,17 +86,8 @@ func (t *basicSupersedesTransform) transformAttachment(msg chat1.MessageUnboxed,
 	if len(uploaded.Previews) > 0 {
 		attachment.Preview = &uploaded.Previews[0]
 	}
-	newMsg := chat1.NewMessageUnboxedWithValid(chat1.MessageUnboxedValid{
-		ClientHeader:          clientHeader,
-		ServerHeader:          msg.Valid().ServerHeader,
-		MessageBody:           chat1.NewMessageBodyWithAttachment(attachment),
-		SenderUsername:        msg.Valid().SenderUsername,
-		SenderDeviceName:      msg.Valid().SenderDeviceName,
-		SenderDeviceType:      msg.Valid().SenderDeviceType,
-		HeaderHash:            msg.Valid().HeaderHash,
-		HeaderSignature:       msg.Valid().HeaderSignature,
-		SenderDeviceRevokedAt: msg.Valid().SenderDeviceRevokedAt,
-	})
+	mvalid.MessageBody = chat1.NewMessageBodyWithAttachment(attachment)
+	newMsg := chat1.NewMessageUnboxedWithValid(mvalid)
 	return &newMsg
 }
 
@@ -107,22 +98,32 @@ func (t *basicSupersedesTransform) transformReaction(msg chat1.MessageUnboxed, s
 
 	reactionMap := msg.Valid().Reactions
 	if reactionMap.Reactions == nil {
-		reactionMap.Reactions = map[string][]chat1.Reaction{}
+		reactionMap.Reactions = map[string]map[string]chat1.Reaction{}
 	}
 
 	reactionText := superMsg.Valid().MessageBody.Reaction().Body
 	reactions, ok := reactionMap.Reactions[reactionText]
 	if !ok {
-		reactions = []chat1.Reaction{}
+		reactions = map[string]chat1.Reaction{}
 	}
-	reactions = append(reactions, chat1.Reaction{
-		Username:      superMsg.Valid().SenderUsername,
+	reactions[superMsg.Valid().SenderUsername] = chat1.Reaction{
 		ReactionMsgID: superMsg.GetMessageID(),
-	})
+		Ctime:         superMsg.Valid().ServerHeader.Ctime,
+	}
 	reactionMap.Reactions[reactionText] = reactions
 
 	mvalid := msg.Valid()
 	mvalid.Reactions = reactionMap
+	newMsg := chat1.NewMessageUnboxedWithValid(mvalid)
+	return &newMsg
+}
+
+func (t *basicSupersedesTransform) transformUnfurl(msg chat1.MessageUnboxed, superMsg chat1.MessageUnboxed) *chat1.MessageUnboxed {
+	if superMsg.Valid().MessageBody.IsNil() {
+		return &msg
+	}
+	mvalid := msg.Valid()
+	utils.SetUnfurl(&mvalid, superMsg.GetMessageID(), superMsg.Valid().MessageBody.Unfurl().Unfurl)
 	newMsg := chat1.NewMessageUnboxedWithValid(mvalid)
 	return &newMsg
 }
@@ -149,6 +150,8 @@ func (t *basicSupersedesTransform) transform(ctx context.Context, msg chat1.Mess
 			newMsg = t.transformAttachment(*newMsg, superMsg)
 		case chat1.MessageType_REACTION:
 			newMsg = t.transformReaction(*newMsg, superMsg)
+		case chat1.MessageType_UNFURL:
+			newMsg = t.transformUnfurl(*newMsg, superMsg)
 		}
 
 		t.Debug(ctx, "transformed: original:%v super:%v -> %v",
@@ -180,6 +183,7 @@ func (t *basicSupersedesTransform) Run(ctx context.Context,
 				superMsgIDs = append(superMsgIDs, supersededBy)
 			}
 			superMsgIDs = append(superMsgIDs, msg.Valid().ServerHeader.ReactionIDs...)
+			superMsgIDs = append(superMsgIDs, msg.Valid().ServerHeader.UnfurlIDs...)
 		}
 	}
 
@@ -220,6 +224,11 @@ func (t *basicSupersedesTransform) Run(ctx context.Context,
 
 	// Run through all messages and transform superseded messages into final state
 	var newMsgs []chat1.MessageUnboxed
+	xformDelete := func(msgID chat1.MessageID) {
+		if t.opts.UseDeletePlaceholders {
+			newMsgs = append(newMsgs, utils.CreateHiddenPlaceholder(msgID))
+		}
+	}
 	for i, msg := range originalMsgs {
 		if msg.IsValid() {
 			newMsg := &originalMsgs[i]
@@ -230,9 +239,12 @@ func (t *basicSupersedesTransform) Run(ctx context.Context,
 			if newMsg == nil {
 				// Transform might return nil in case of a delete.
 				t.Debug(ctx, "skipping: %d because it was deleted", msg.GetMessageID())
+				xformDelete(msg.GetMessageID())
 				continue
 			}
-			if newMsg.GetMessageID() < deleteHistoryUpto && chat1.IsDeletableByDeleteHistory(newMsg.GetMessageType()) {
+			if newMsg.GetMessageID() < deleteHistoryUpto &&
+				chat1.IsDeletableByDeleteHistory(newMsg.GetMessageType()) {
+				xformDelete(msg.GetMessageID())
 				continue
 			}
 			if !newMsg.IsValidFull() {
@@ -241,8 +253,12 @@ func (t *basicSupersedesTransform) Run(ctx context.Context,
 				// deleted by a delete-history, retention expunge, or was an
 				// exploding message.
 				mvalid := newMsg.Valid()
-				if !mvalid.IsEphemeral() || mvalid.HideExplosion(conv.GetExpunge(), time.Now()) {
-					t.Debug(ctx, "skipping: %d because not valid full", msg.GetMessageID())
+				if !mvalid.IsEphemeral() || mvalid.HideExplosion(conv.GetMaxDeletedUpTo(), time.Now()) {
+					btyp, _ := mvalid.MessageBody.MessageType()
+					t.Debug(ctx, "skipping: %d because not valid full: typ: %v bodymatch: %v btyp: %v",
+						msg.GetMessageID(), msg.GetMessageType(),
+						mvalid.MessageBody.IsType(msg.GetMessageType()), btyp)
+					xformDelete(msg.GetMessageID())
 					continue
 				}
 			}

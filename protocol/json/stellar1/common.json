@@ -2,7 +2,7 @@
   "protocol": "common",
   "imports": [
     {
-      "path": "github.com/keybase/client/go/protocol/keybase1",
+      "path": "../keybase1",
       "type": "idl",
       "import_as": "keybase1"
     }
@@ -28,6 +28,12 @@
     },
     {
       "type": "record",
+      "name": "PaymentID",
+      "fields": [],
+      "typedef": "string"
+    },
+    {
+      "type": "record",
       "name": "KeybaseTransactionID",
       "fields": [],
       "typedef": "string"
@@ -46,6 +52,18 @@
     },
     {
       "type": "record",
+      "name": "KeybaseRequestID",
+      "fields": [],
+      "typedef": "string"
+    },
+    {
+      "type": "record",
+      "name": "AssetCode",
+      "fields": [],
+      "typedef": "string"
+    },
+    {
+      "type": "record",
       "name": "Asset",
       "fields": [
         {
@@ -59,6 +77,79 @@
         {
           "type": "string",
           "name": "issuer"
+        },
+        {
+          "type": "string",
+          "name": "verifiedDomain"
+        },
+        {
+          "type": "string",
+          "name": "issuerName"
+        },
+        {
+          "type": "string",
+          "name": "desc"
+        },
+        {
+          "type": "string",
+          "name": "infoUrl"
+        },
+        {
+          "type": "string",
+          "name": "infoUrlText"
+        },
+        {
+          "type": "boolean",
+          "name": "showDepositButton"
+        },
+        {
+          "type": "string",
+          "name": "depositButtonText"
+        },
+        {
+          "type": "boolean",
+          "name": "showWithdrawButton"
+        },
+        {
+          "type": "string",
+          "name": "withdrawButtonText"
+        },
+        {
+          "type": "string",
+          "name": "withdrawType"
+        },
+        {
+          "type": "string",
+          "name": "transferServer"
+        },
+        {
+          "type": "string",
+          "name": "authEndpoint"
+        },
+        {
+          "type": "boolean",
+          "name": "depositReqAuth"
+        },
+        {
+          "type": "boolean",
+          "name": "withdrawReqAuth"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "AssetListResult",
+      "fields": [
+        {
+          "type": {
+            "type": "array",
+            "items": "Asset"
+          },
+          "name": "assets"
+        },
+        {
+          "type": "int",
+          "name": "totalCount"
         }
       ]
     },
@@ -77,6 +168,24 @@
         {
           "type": "string",
           "name": "limit"
+        },
+        {
+          "type": "boolean",
+          "name": "isAuthorized"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "AccountReserve",
+      "fields": [
+        {
+          "type": "string",
+          "name": "amount"
+        },
+        {
+          "type": "string",
+          "name": "description"
         }
       ]
     },
@@ -89,6 +198,15 @@
         "SUCCESS_2",
         "ERROR_TRANSIENT_3",
         "ERROR_PERMANENT_4"
+      ]
+    },
+    {
+      "type": "enum",
+      "name": "RequestStatus",
+      "symbols": [
+        "OK_0",
+        "CANCELED_1",
+        "DONE_2"
       ]
     },
     {
@@ -112,6 +230,10 @@
       "type": "record",
       "name": "PaymentResult",
       "fields": [
+        {
+          "type": "AccountID",
+          "name": "senderAccountID"
+        },
         {
           "type": "KeybaseTransactionID",
           "name": "keybaseID"
@@ -319,6 +441,66 @@
         {
           "type": "string",
           "name": "relayCursor"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "name": "AccountMode",
+      "symbols": [
+        "NONE_0",
+        "USER_1",
+        "MOBILE_2"
+      ]
+    },
+    {
+      "type": "record",
+      "name": "Trustline",
+      "fields": [
+        {
+          "type": "AssetCode",
+          "name": "assetCode"
+        },
+        {
+          "type": "AccountID",
+          "name": "issuer"
+        }
+      ]
+    },
+    {
+      "type": "record",
+      "name": "PaymentPath",
+      "fields": [
+        {
+          "type": "string",
+          "name": "sourceAmount"
+        },
+        {
+          "type": "string",
+          "name": "sourceAmountMax"
+        },
+        {
+          "type": "Asset",
+          "name": "sourceAsset"
+        },
+        {
+          "type": {
+            "type": "array",
+            "items": "Asset"
+          },
+          "name": "path"
+        },
+        {
+          "type": "string",
+          "name": "destinationAmount"
+        },
+        {
+          "type": "Asset",
+          "name": "destinationAsset"
+        },
+        {
+          "type": "string",
+          "name": "sourceInsufficientBalance"
         }
       ]
     }

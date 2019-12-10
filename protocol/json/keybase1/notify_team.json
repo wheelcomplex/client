@@ -28,6 +28,15 @@
           "name": "misc"
         }
       ]
+    },
+    {
+      "type": "enum",
+      "name": "AvatarUpdateType",
+      "symbols": [
+        "NONE_0",
+        "USER_1",
+        "TEAM_2"
+      ]
     }
   ],
   "messages": {
@@ -48,6 +57,14 @@
         {
           "name": "changes",
           "type": "TeamChangeSet"
+        },
+        {
+          "name": "latestHiddenSeqno",
+          "type": "Seqno"
+        },
+        {
+          "name": "latestOffchainSeqno",
+          "type": "Seqno"
         }
       ],
       "response": null,
@@ -70,6 +87,14 @@
         {
           "name": "changes",
           "type": "TeamChangeSet"
+        },
+        {
+          "name": "latestHiddenSeqno",
+          "type": "Seqno"
+        },
+        {
+          "name": "latestOffchainSeqno",
+          "type": "Seqno"
         }
       ],
       "response": null,
@@ -102,6 +127,52 @@
           "type": "TeamID"
         }
       ],
+      "response": null,
+      "oneway": true
+    },
+    "newlyAddedToTeam": {
+      "request": [
+        {
+          "name": "teamID",
+          "type": "TeamID"
+        }
+      ],
+      "response": null,
+      "oneway": true
+    },
+    "teamRoleMapChanged": {
+      "request": [
+        {
+          "name": "newVersion",
+          "type": "UserTeamVersion"
+        }
+      ],
+      "response": null,
+      "oneway": true
+    },
+    "avatarUpdated": {
+      "request": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "formats",
+          "type": {
+            "type": "array",
+            "items": "AvatarFormat"
+          }
+        },
+        {
+          "name": "typ",
+          "type": "AvatarUpdateType"
+        }
+      ],
+      "response": null,
+      "oneway": true
+    },
+    "teamMetadataUpdate": {
+      "request": [],
       "response": null,
       "oneway": true
     }

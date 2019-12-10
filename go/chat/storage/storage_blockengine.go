@@ -217,54 +217,72 @@ func (be *blockEngine) getBlock(ctx context.Context, bi blockIndex, id chat1.Mes
 	return be.readBlock(ctx, bi, bn)
 }
 
-func (be *blockEngine) readBlock(ctx context.Context, bi blockIndex, id int) (block, Error) {
-
+func (be *blockEngine) readBlock(ctx context.Context, bi blockIndex, id int) (res block, err Error) {
 	be.Debug(ctx, "readBlock: reading block: %d", id)
+	// Manage in memory cache
+	if b, ok := blockEngineMemCache.getBlock(ctx, bi.UID, bi.ConvID, id); ok {
+		be.Debug(ctx, "readBlock: cache hit")
+		return b, nil
+	}
+	defer func() {
+		if err == nil {
+			blockEngineMemCache.writeBlock(ctx, bi.UID, bi.ConvID, res)
+		}
+	}()
+
 	key := be.makeBlockKey(bi.ConvID, bi.UID, id)
-	raw, found, err := be.G().LocalChatDb.GetRaw(key)
-	if err != nil {
-		return block{}, NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to read raw: %s", err.Error())
+	raw, found, ierr := be.G().LocalChatDb.GetRaw(key)
+	if ierr != nil {
+		return res,
+			NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to read raw: %s", ierr.Error())
 	}
 	if !found {
 		// Didn't find it for some reason
-		return block{}, NewInternalError(ctx, be.DebugLabeler, "readBlock: block not found: id: %d", id)
+		return res, NewInternalError(ctx, be.DebugLabeler, "readBlock: block not found: id: %d", id)
 	}
 
 	// Decode boxed block
 	var b boxedBlock
-	if err = decode(raw, &b); err != nil {
-		return block{}, NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to decode: %s", err.Error())
+	if ierr := decode(raw, &b); ierr != nil {
+		return res,
+			NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to decode: %s", ierr.Error())
 	}
 	if b.V > cryptoVersion {
-		return block{}, NewInternalError(ctx, be.DebugLabeler, "readBlock: bad crypto version: %d current: %d id: %d", b.V, cryptoVersion, id)
+		return res,
+			NewInternalError(ctx, be.DebugLabeler, "readBlock: bad crypto version: %d current: %d id: %d", b.V,
+				cryptoVersion, id)
 	}
 
 	// Decrypt block
 	fkey, cerr := be.fetchSecretKey(ctx)
 	if cerr != nil {
-		return block{}, cerr
+		return res, cerr
 	}
 	pt, ok := secretbox.Open(nil, b.E, &b.N, &fkey)
 	if !ok {
-		return block{}, NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to decrypt block: %d", id)
+		return res, NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to decrypt block: %d", id)
 	}
 
 	// Decode payload
-	var res block
-	if err = decode(pt, &res); err != nil {
-		return block{}, NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to decode: %s", err.Error())
+	if ierr = decode(pt, &res); ierr != nil {
+		return res,
+			NewInternalError(ctx, be.DebugLabeler, "readBlock: failed to decode: %s", ierr.Error())
 	}
-
 	return res, nil
 }
 
-func (be *blockEngine) writeBlock(ctx context.Context, bi blockIndex, b block) Error {
+func (be *blockEngine) writeBlock(ctx context.Context, bi blockIndex, b block) (err Error) {
 	be.Debug(ctx, "writeBlock: writing out block: %d", b.BlockID)
+	defer func() {
+		if err == nil {
+			blockEngineMemCache.writeBlock(ctx, bi.UID, bi.ConvID, b)
+		}
+	}()
 
 	// Encode block
-	dat, err := encode(b)
-	if err != nil {
-		return NewInternalError(ctx, be.DebugLabeler, "writeBlock: failed to encode: %s", err.Error())
+	dat, ierr := encode(b)
+	if ierr != nil {
+		return NewInternalError(ctx, be.DebugLabeler, "writeBlock: failed to encode: %s", ierr.Error())
 	}
 
 	// Encrypt block
@@ -273,9 +291,9 @@ func (be *blockEngine) writeBlock(ctx context.Context, bi blockIndex, b block) E
 		return cerr
 	}
 	var nonce []byte
-	nonce, err = libkb.RandBytes(24)
-	if err != nil {
-		return MiscError{Msg: fmt.Sprintf("encryptMessage: failure to generate nonce: %s", err.Error())}
+	nonce, ierr = libkb.RandBytes(24)
+	if ierr != nil {
+		return MiscError{Msg: fmt.Sprintf("encryptMessage: failure to generate nonce: %s", ierr.Error())}
 	}
 	var fnonce [24]byte
 	copy(fnonce[:], nonce)
@@ -287,14 +305,14 @@ func (be *blockEngine) writeBlock(ctx context.Context, bi blockIndex, b block) E
 		N: fnonce,
 		E: sealed,
 	}
-	bpayload, err := encode(payload)
-	if err != nil {
-		return NewInternalError(ctx, be.DebugLabeler, "writeBlock: failed to encode: %s", err.Error())
+	bpayload, ierr := encode(payload)
+	if ierr != nil {
+		return NewInternalError(ctx, be.DebugLabeler, "writeBlock: failed to encode: %s", ierr.Error())
 	}
 
 	// Write out encrypted block
-	if err = be.G().LocalChatDb.PutRaw(be.makeBlockKey(bi.ConvID, bi.UID, b.BlockID), bpayload); err != nil {
-		return NewInternalError(ctx, be.DebugLabeler, "writeBlock: failed to write: %s", err.Error())
+	if ierr := be.G().LocalChatDb.PutRaw(be.makeBlockKey(bi.ConvID, bi.UID, b.BlockID), bpayload); ierr != nil {
+		return NewInternalError(ctx, be.DebugLabeler, "writeBlock: failed to write: %s", ierr.Error())
 	}
 	return nil
 }
@@ -372,7 +390,7 @@ func (be *blockEngine) writeMessagesIDMap(ctx context.Context, convID chat1.Conv
 }
 
 func (be *blockEngine) ReadMessages(ctx context.Context, res ResultCollector,
-	convID chat1.ConversationID, uid gregor1.UID, maxID chat1.MessageID) (err Error) {
+	convID chat1.ConversationID, uid gregor1.UID, maxID, minID chat1.MessageID) (err Error) {
 
 	// Run all errors through resultCollector
 	defer func() {
@@ -405,7 +423,9 @@ func (be *blockEngine) ReadMessages(ctx context.Context, res ResultCollector,
 		}
 
 		msg := b.Msgs[index]
-		if msg.GetMessageID() == 0 {
+		// If we have a versioning error but our client now understands the new
+		// version, don't return the error message
+		if msg.GetMessageID() == 0 || (msg.IsError() && msg.Error().ParseableVersion()) {
 			if res.PushPlaceholder(be.getMsgID(b.BlockID, index)) {
 				// If the result collector is happy to receive this blank entry, then don't complain
 				// and proceed as if this was a hit
@@ -418,6 +438,9 @@ func (be *blockEngine) ReadMessages(ctx context.Context, res ResultCollector,
 					b.BlockID, be.getMsgID(b.BlockID, index))
 				return MissError{}
 			}
+		} else if msg.GetMessageID() <= minID {
+			// If we drop below the min ID, just bail out of here with no error
+			return nil
 		}
 		bMsgID := msg.GetMessageID()
 
@@ -436,7 +459,7 @@ func (be *blockEngine) ReadMessages(ctx context.Context, res ResultCollector,
 	// again. We check if lastAdded > 0 to avoid overflowing chat1.MessageID
 	// which is a uint type
 	if !res.Done() && b.BlockID > 0 && lastAdded > 0 {
-		return be.ReadMessages(ctx, res, convID, uid, lastAdded-1)
+		return be.ReadMessages(ctx, res, convID, uid, lastAdded-1, minID)
 	}
 	return nil
 }

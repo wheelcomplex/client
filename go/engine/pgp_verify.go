@@ -68,7 +68,7 @@ func (e *PGPVerify) SubConsumers() []libkb.UIConsumer {
 // Run starts the engine.
 func (e *PGPVerify) Run(m libkb.MetaContext) error {
 	var err error
-	defer m.CTrace("PGPVerify#Run", func() error { return err })()
+	defer m.Trace("PGPVerify#Run", func() error { return err })()
 	var sc libkb.StreamClassification
 	sc, e.source, err = libkb.ClassifyStream(e.arg.Source)
 
@@ -167,7 +167,10 @@ func (e *PGPVerify) runDetached(m libkb.MetaContext) error {
 		}
 
 		fingerprint := libkb.PGPFingerprint(signer.PrimaryKey.Fingerprint)
-		OutputSignatureSuccess(m, fingerprint, e.signer, e.signStatus.SignatureTime)
+		err = OutputSignatureSuccess(m, fingerprint, e.signer, e.signStatus.SignatureTime)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -227,7 +230,10 @@ func (e *PGPVerify) runClearsign(m libkb.MetaContext) error {
 		}
 
 		fingerprint := libkb.PGPFingerprint(signer.PrimaryKey.Fingerprint)
-		OutputSignatureSuccess(m, fingerprint, e.signer, e.signStatus.SignatureTime)
+		err = OutputSignatureSuccess(m, fingerprint, e.signer, e.signStatus.SignatureTime)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -245,7 +251,7 @@ func (e *PGPVerify) checkSignedBy(m libkb.MetaContext) error {
 
 	// have: a valid signature, the signature's owner, and a user assertion to
 	// match against
-	m.CDebugf("checking signed by assertion: %q", e.arg.SignedBy)
+	m.Debug("checking signed by assertion: %q", e.arg.SignedBy)
 
 	// load the user in SignedBy
 	arg := keybase1.Identify2Arg{
@@ -258,14 +264,17 @@ func (e *PGPVerify) checkSignedBy(m libkb.MetaContext) error {
 	if err := RunEngine2(m, eng); err != nil {
 		return err
 	}
-	signByUser := eng.Result().Upk
+	res, err := eng.Result(m)
+	if err != nil {
+		return err
+	}
+	signByUser := res.Upk
 
 	// check if it is equal to signature owner
-	if !e.signer.GetUID().Equal(signByUser.Uid) {
+	if !e.signer.GetUID().Equal(signByUser.GetUID()) {
 		return libkb.BadSigError{
 			E: fmt.Sprintf("Signer %q did not match signed by assertion %q", e.signer.GetName(), e.arg.SignedBy),
 		}
 	}
-
 	return nil
 }

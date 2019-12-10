@@ -6,7 +6,7 @@ package install
 import (
 	"bufio"
 	"bytes"
-	"errors"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -24,19 +24,13 @@ import (
 	"io/ioutil"
 
 	"github.com/keybase/client/go/libkb"
+	"github.com/keybase/client/go/logger"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 )
 
 // Install only handles the driver part on Windows
 func Install(context Context, binPath string, sourcePath string, components []string, force bool, timeout time.Duration, log Log) keybase1.InstallResult {
 	return keybase1.InstallResult{}
-}
-
-func componentResult(name string, err error) keybase1.ComponentResult {
-	if err != nil {
-		return keybase1.ComponentResult{Name: string(name), Status: keybase1.StatusFromCode(keybase1.StatusCode_SCInstallError, err.Error())}
-	}
-	return keybase1.ComponentResult{Name: string(name), Status: keybase1.StatusOK("")}
 }
 
 // AutoInstall is not supported on Windows
@@ -68,6 +62,14 @@ func updaterBinName() (string, error) {
 	// which is complete and total BULLSHIT LOL:
 	// https://technet.microsoft.com/en-us/library/cc709628%28v=ws.10%29.aspx?f=255&MSPPError=-2147217396
 	return "upd.exe", nil
+}
+
+func rqBinPath() (string, error) {
+	path, err := BinPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "keybaserq.exe"), nil
 }
 
 // RunApp starts the app
@@ -294,37 +296,25 @@ func IsInUse(mountDir string, log Log) bool {
 	return false
 }
 
-func getCachedPackageModifyString(log Log) (string, error) {
+// StartUpdateIfNeeded starts to update the app if there's one available. It
+// calls `updater check` internally so it ignores the snooze.
+func StartUpdateIfNeeded(ctx context.Context, log logger.Logger) error {
+	rqPath, err := rqBinPath()
+	if err != nil {
+		return err
+	}
+	updaterPath, err := UpdaterBinPath()
+	if err != nil {
+		return err
+	}
+	log.Debug("Starting updater with keybaserq.exe")
+	if err = exec.Command(rqPath, updaterPath, "check").Run(); err != nil {
+		return err
+	}
+	return nil
+}
 
-	k, err := registry.OpenKey(registry.CURRENT_USER, `SOFTWARE\Keybase\Keybase\`, registry.READ|registry.WOW64_64KEY)
-	defer k.Close()
-	if err != nil {
-		log.Debug("getCachedPackageModifyString: can't open SOFTWARE\\Keybase\\Keybase\\")
-		return "", err
-	}
-	bundleKey, _, err := k.GetStringValue("BUNDLEKEY")
-	if err != nil || bundleKey == "" {
-		log.Debug("getCachedPackageModifyString: can't read SOFTWARE\\Keybase\\Keybase\\BUNDLEKEY")
-		return "", err
-	}
-
-	k2, err := registry.OpenKey(registry.CURRENT_USER, `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`+bundleKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
-	if err != nil {
-		log.Debug("getCachedPackageModifyString: can't read " + `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` + bundleKey)
-		return "", err
-	}
-	displayName, _, err := k2.GetStringValue("DisplayName")
-	if err != nil {
-		log.Debug("getCachedPackageModifyString: can't read DisplayName of " + `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` + bundleKey)
-	}
-	publisher, _, err := k2.GetStringValue("Publisher")
-	if err != nil {
-		log.Debug("getCachedPackageModifyString: can't read publisher of " + `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` + bundleKey)
-	}
-	if displayName == "Keybase" && publisher == "Keybase, Inc." {
-		modify, _, err := k2.GetStringValue("ModifyPath")
-		return modify, err
-	}
-	log.Debug("getCachedPackageModifyString: " + `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` + bundleKey + "displayName " + displayName + ", publisher " + publisher)
-	return "", errors.New("no cached package path found")
+func LsofMount(mountDir string, log Log) ([]CommonLsofResult, error) {
+	log.Warning("Cannot use lsof on Windows.")
+	return nil, fmt.Errorf("Cannot use lsof on Windows.")
 }

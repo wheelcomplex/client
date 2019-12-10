@@ -21,6 +21,7 @@ func (r *settingsResponse) GetAppStatus() *libkb.AppStatus {
 }
 
 func GetTeamRepoSettings(ctx context.Context, g *libkb.GlobalContext, arg keybase1.GetTeamRepoSettingsArg) (keybase1.GitTeamRepoSettings, error) {
+	mctx := libkb.NewMetaContext(ctx, g)
 	if arg.Folder.FolderType != keybase1.FolderType_TEAM {
 		return keybase1.GitTeamRepoSettings{ChatDisabled: true}, nil
 	}
@@ -31,7 +32,7 @@ func GetTeamRepoSettings(ctx context.Context, g *libkb.GlobalContext, arg keybas
 	}
 
 	var resp settingsResponse
-	if err := g.GetAPI().GetDecode(*apiArg, &resp); err != nil {
+	if err := g.GetAPI().GetDecode(mctx, *apiArg, &resp); err != nil {
 		return keybase1.GitTeamRepoSettings{}, err
 	}
 
@@ -68,6 +69,7 @@ func convertTeamRepoSettings(ctx context.Context, g *libkb.GlobalContext,
 }
 
 func SetTeamRepoSettings(ctx context.Context, g *libkb.GlobalContext, arg keybase1.SetTeamRepoSettingsArg) error {
+	mctx := libkb.NewMetaContext(ctx, g)
 	if arg.Folder.FolderType != keybase1.FolderType_TEAM {
 		return errors.New("SetTeamRepoSettings denied: this repo is not a team repo")
 	}
@@ -80,10 +82,11 @@ func SetTeamRepoSettings(ctx context.Context, g *libkb.GlobalContext, arg keybas
 	if arg.ChannelName != nil && *(arg.ChannelName) != "" {
 		// lookup the conv id for the channel name
 		vis := keybase1.TLFVisibility_PRIVATE
-		if !arg.Folder.Private {
+		if arg.Folder.FolderType == keybase1.FolderType_PUBLIC {
 			vis = keybase1.TLFVisibility_PUBLIC
 		}
-		convs, err := g.ChatHelper.FindConversations(ctx, arg.Folder.Name, arg.ChannelName, chat1.TopicType_CHAT, chat1.ConversationMembersType_TEAM, vis)
+		convs, err := g.ChatHelper.FindConversations(ctx, arg.Folder.Name, arg.ChannelName,
+			chat1.TopicType_CHAT, chat1.ConversationMembersType_TEAM, vis)
 		if err != nil {
 			return err
 		}
@@ -95,14 +98,21 @@ func SetTeamRepoSettings(ctx context.Context, g *libkb.GlobalContext, arg keybas
 		}
 		convID := convs[0].Info.Id
 		apiArg.Args["chat_conv_id"] = libkb.HexArg(convID)
+		apiArg.AppStatusCodes = []int{libkb.SCOk, libkb.SCTeamWritePermDenied}
 	}
 
-	_, err = g.GetAPI().Post(*apiArg)
-	return err
+	apiRes, err := g.GetAPI().Post(mctx, *apiArg)
+	if err != nil {
+		return err
+	}
+	if apiRes.AppStatus.Code == libkb.SCTeamWritePermDenied {
+		return libkb.TeamWritePermDeniedError{}
+	}
+	return nil
 }
 
 func settingsArg(ctx context.Context, g *libkb.GlobalContext,
-	folder keybase1.Folder, repoID keybase1.RepoID) (apiArg *libkb.APIArg, teamID keybase1.TeamID, err error) {
+	folder keybase1.FolderHandle, repoID keybase1.RepoID) (apiArg *libkb.APIArg, teamID keybase1.TeamID, err error) {
 	teamer := NewTeamer(g)
 	teamIDVis, err := teamer.LookupOrCreate(ctx, folder)
 	if err != nil {
@@ -111,7 +121,6 @@ func settingsArg(ctx context.Context, g *libkb.GlobalContext,
 	apiArg = &libkb.APIArg{
 		Endpoint:    "kbfs/git/team/settings",
 		SessionType: libkb.APISessionTypeREQUIRED,
-		NetContext:  ctx,
 		Args: libkb.HTTPArgs{
 			"team_id": libkb.S{Val: string(teamIDVis.TeamID)},
 			"repo_id": libkb.S{Val: string(repoID)},

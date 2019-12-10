@@ -45,7 +45,7 @@ func (t *ephemeralTracker) dbGet(ctx context.Context, uid gregor1.UID) (info all
 	dbKey := t.makeDbKey(uid)
 	raw, found, lerr := t.G().LocalChatDb.GetRaw(dbKey)
 
-	if err != nil {
+	if lerr != nil {
 		return nil, NewInternalError(ctx, t.DebugLabeler, "GetRaw error: %s", lerr.Error())
 	}
 	if !found {
@@ -125,10 +125,8 @@ func (t *ephemeralTracker) setPurgeInfo(ctx context.Context,
 	t.Debug(ctx, "setPurgeInfo setting info: %v", *purgeInfo)
 	if err = t.dbSet(ctx, uid, allPurgeInfo); err == nil {
 		// Let our background monitor know about the new info.
-		if purger := t.G().EphemeralPurger; purger != nil {
-			if qerr := purger.Queue(ctx, *purgeInfo); qerr != nil {
-				return NewInternalError(ctx, t.DebugLabeler, "purger.Queue error: %s", qerr.Error())
-			}
+		if qerr := t.G().EphemeralPurger.Queue(ctx, *purgeInfo); qerr != nil {
+			return NewInternalError(ctx, t.DebugLabeler, "purger.Queue error: %s", qerr.Error())
 		}
 	}
 	return err
@@ -168,10 +166,8 @@ func (t *ephemeralTracker) maybeUpdatePurgeInfo(ctx context.Context,
 	allPurgeInfo[convID.String()] = *purgeInfo
 	if err = t.dbSet(ctx, uid, allPurgeInfo); err == nil {
 		// Let our background monitor know about the new info.
-		if purger := t.G().EphemeralPurger; purger != nil {
-			if qerr := purger.Queue(ctx, *purgeInfo); qerr != nil {
-				return NewInternalError(ctx, t.DebugLabeler, "purger.Queue error: %s", qerr.Error())
-			}
+		if qerr := t.G().EphemeralPurger.Queue(ctx, *purgeInfo); qerr != nil {
+			return NewInternalError(ctx, t.DebugLabeler, "purger.Queue error: %s", qerr.Error())
 		}
 	}
 	return err
@@ -195,11 +191,13 @@ func (t *ephemeralTracker) inactivatePurgeInfo(ctx context.Context,
 	purgeInfo.IsActive = false
 	if err = t.dbSet(ctx, uid, allPurgeInfo); err == nil {
 		// Let our background monitor know about the new info.
-		if purger := t.G().EphemeralPurger; purger != nil {
-			if qerr := purger.Queue(ctx, purgeInfo); qerr != nil {
-				return NewInternalError(ctx, t.DebugLabeler, "purger.Queue error: %s", qerr.Error())
-			}
+		if qerr := t.G().EphemeralPurger.Queue(ctx, purgeInfo); qerr != nil {
+			return NewInternalError(ctx, t.DebugLabeler, "purger.Queue error: %s", qerr.Error())
 		}
 	}
 	return err
+}
+
+func (t *ephemeralTracker) clear(uid gregor1.UID) error {
+	return t.G().LocalChatDb.Delete(t.makeDbKey(uid))
 }

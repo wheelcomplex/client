@@ -56,14 +56,14 @@ func (e *PaperKeySubmit) Run(m libkb.MetaContext) error {
 		return err
 	}
 
-	m.ActiveDevice().CachePaperKey(m, e.deviceWithKeys)
+	m.ActiveDevice().CacheProvisioningKey(m, e.deviceWithKeys)
 
 	// send a notification that a paper key has been cached
 	// for rekey purposes
 	m.G().NotifyRouter.HandlePaperKeyCached(me.GetUID(), e.deviceWithKeys.EncryptionKey().GetKID(), e.deviceWithKeys.SigningKey().GetKID())
 
 	// XXX - this is temporary until KBFS handles the above notification
-	m.G().UserChanged(me.GetUID())
+	m.G().UserChanged(m.Ctx(), me.GetUID())
 
 	return nil
 }

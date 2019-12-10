@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/keybase/client/go/kbcrypto"
 	"github.com/keybase/client/go/libkb"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
 )
@@ -146,7 +147,7 @@ func (e *PGPKeyExportEngine) exportSecret(m libkb.MetaContext) error {
 	}
 	fp := libkb.GetPGPFingerprintFromGenericKey(key)
 	if fp == nil {
-		return libkb.BadKeyError{Msg: "no fingerprint found"}
+		return kbcrypto.BadKeyError{Msg: "no fingerprint found"}
 	}
 
 	if !e.queryMatch(key) {
@@ -154,12 +155,12 @@ func (e *PGPKeyExportEngine) exportSecret(m libkb.MetaContext) error {
 	}
 
 	if _, ok := key.(*libkb.PGPKeyBundle); !ok {
-		return libkb.BadKeyError{Msg: "Expected a PGP key"}
+		return kbcrypto.BadKeyError{Msg: "Expected a PGP key"}
 	}
 
 	raw := skb.RawUnlockedKey()
 	if raw == nil {
-		return libkb.BadKeyError{Msg: "can't get raw representation of key"}
+		return kbcrypto.BadKeyError{Msg: "can't get raw representation of key"}
 	}
 
 	if e.encrypted {
@@ -189,6 +190,9 @@ func GetPGPExportPassphrase(m libkb.MetaContext, ui libkb.SecretUI, desc string)
 
 	desc = "Please reenter your passphrase for confirmation"
 	pRes2, err := libkb.GetSecret(m, ui, "PGP key passphrase", desc, "", false)
+	if err != nil {
+		return keybase1.GetPassphraseRes{}, err
+	}
 	if pRes.Passphrase != pRes2.Passphrase {
 		return keybase1.GetPassphraseRes{}, errors.New("Passphrase mismatch")
 	}
@@ -203,7 +207,7 @@ func (e *PGPKeyExportEngine) encryptKey(m libkb.MetaContext, raw []byte) ([]byte
 	}
 
 	if entity.PrivateKey == nil {
-		return nil, libkb.BadKeyError{Msg: "No secret part in PGP key."}
+		return nil, kbcrypto.BadKeyError{Msg: "No secret part in PGP key."}
 	}
 
 	desc := "Enter passphrase to protect your PGP key. Secure passphrases have at least 8 characters."
@@ -230,7 +234,7 @@ func (e *PGPKeyExportEngine) loadMe(m libkb.MetaContext) (err error) {
 }
 
 func (e *PGPKeyExportEngine) Run(m libkb.MetaContext) (err error) {
-	defer m.CTrace("PGPKeyExportEngine::Run", func() error { return err })()
+	defer m.Trace("PGPKeyExportEngine::Run", func() error { return err })()
 
 	if e.qtype == unset {
 		return fmt.Errorf("PGPKeyExportEngine: query type not set")
